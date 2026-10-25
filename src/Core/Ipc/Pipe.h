@@ -29,8 +29,9 @@ namespace fastlook::core::ipc
         std::unique_ptr<Impl> m_impl;
     };
 
-    // Single-instance server (PIPE_REJECT_REMOTE_CLIENTS, overlapped, DACL: current user and SYSTEM only). The next
-    // client is accepted once the previous connection is closed.
+    // Single-instance server (PIPE_REJECT_REMOTE_CLIENTS, overlapped, DACL: current user and SYSTEM only). One connection
+    // at a time: the next instance is created only after the previous connection's handle is closed, always with
+    // FILE_FLAG_FIRST_PIPE_INSTANCE. Accepted clients must run as the current user.
     class PipeServer
     {
     public:
@@ -39,8 +40,9 @@ namespace fastlook::core::ipc
         PipeServer(PipeServer const&) = delete;
         PipeServer& operator=(PipeServer const&) = delete;
 
-        // Win32 error of the last failed instance creation (0 = healthy); Accept returns nullopt at once while a
-        // non-busy creation error persists, so a broken server is visible instead of retrying forever.
+        // Win32 error of the last failed instance creation (0 = healthy). ERROR_ACCESS_DENIED / ERROR_PIPE_BUSY mean another process
+        // holds the pipe name. Accept returns nullopt at once while it is set: callers must back off (log, wait or
+        // give up) and not spin on Accept.
         unsigned long Error() const;
         std::optional<PipeConnection> Accept(std::chrono::milliseconds timeout);
         // Wakes a blocked Accept and makes every later Accept return nullopt.

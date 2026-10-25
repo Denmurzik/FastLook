@@ -322,11 +322,16 @@ namespace fastlook::core::ipc
         return m;
     }
 
-    std::wstring PipeNameForCurrentUser()
+    std::wstring UserSidString(unsigned long pid)
     {
+        HANDLE process = pid == 0 ? GetCurrentProcess() : OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!process)
+        {
+            return {};
+        }
         std::wstring sid;
         HANDLE token = nullptr;
-        if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+        if (OpenProcessToken(process, TOKEN_QUERY, &token))
         {
             DWORD size = 0;
             GetTokenInformation(token, TokenUser, nullptr, 0, &size);
@@ -342,6 +347,16 @@ namespace fastlook::core::ipc
             }
             CloseHandle(token);
         }
+        if (pid != 0)
+        {
+            CloseHandle(process);
+        }
+        return sid;
+    }
+
+    std::wstring PipeNameForCurrentUser()
+    {
+        std::wstring sid = UserSidString(0);
         if (sid.empty())
         {
             return {}; // no shared fallback name: a pipe that is not per-user must not exist

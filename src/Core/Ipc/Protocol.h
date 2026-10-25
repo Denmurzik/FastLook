@@ -78,6 +78,9 @@ namespace fastlook::core::ipc
     // nullopt: malformed JSON, missing/unknown "type", "v" missing or != kProtocolVersion, wrongly typed field.
     std::optional<Message> Parse(std::string_view json);
 
+    // SID string of the user the process `pid` runs as (0 = this process); empty on failure.
+    std::wstring UserSidString(unsigned long pid);
+
     // L"\\\\.\\pipe\\FastLook-<user SID string>-v1"; empty when the user SID cannot be queried.
     std::wstring PipeNameForCurrentUser();
 }

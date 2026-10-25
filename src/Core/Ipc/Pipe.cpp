@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -33,64 +34,16 @@ namespace fastlook::core::ipc
             return left <= 0 ? 0 : static_cast<DWORD>(std::min<long long>(left, 0x7FFFFFFF));
         }
 
-        // TOKEN_USER of `token` into `buf`.
-        bool QueryTokenUser(HANDLE token, std::vector<char>& buf)
-        {
-            DWORD size = 0;
-            GetTokenInformation(token, TokenUser, nullptr, 0, &size);
-            if (size == 0)
-            {
-                return false;
-            }
-            buf.assign(size, 0);
-            return GetTokenInformation(token, TokenUser, buf.data(), size, &size) != FALSE;
-        }
-
-        PSID TokenUserSid(std::vector<char>& buf)
-        {
-            return reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid;
-        }
-
-        bool CurrentUserSid(std::vector<char>& buf)
-        {
-            HANDLE token = nullptr;
-            if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
-            {
-                return false;
-            }
-            bool ok = QueryTokenUser(token, buf);
-            CloseHandle(token);
-            return ok;
-        }
-
-        // True when the process serving `pipe` runs as the current user.
-        bool ServerIsCurrentUser(HANDLE pipe)
+        // True when the process at the other end of `pipe` (queried by `pidOf`) runs as `user`.
+        template <typename PidQuery>
+        bool PeerIsUser(HANDLE pipe, PidQuery pidOf, std::wstring const& user)
         {
             ULONG pid = 0;
-            if (!GetNamedPipeServerProcessId(pipe, &pid))
+            if (user.empty() || !pidOf(pipe, &pid))
             {
                 return false;
             }
-            std::vector<char> mine;
-            if (!CurrentUserSid(mine))
-            {
-                return false;
-            }
-            HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-            if (!process)
-            {
-                return false;
-            }
-            HANDLE token = nullptr;
-            bool same = false;
-            if (OpenProcessToken(process, TOKEN_QUERY, &token))
-            {
-                std::vector<char> theirs;
-                same = QueryTokenUser(token, theirs) && EqualSid(TokenUserSid(mine), TokenUserSid(theirs));
-                CloseHandle(token);
-            }
-            CloseHandle(process);
-            return same;
+            return UserSidString(pid) == user;
         }
 
         // Waits for an overlapped operation started on `pipe`. Returns true and the transferred byte count when it
@@ -139,8 +92,10 @@ namespace fastlook::core::ipc
         std::mutex guard;
         int active = 0;
         bool handleClosed = false;
+        // Cleared once the handle is really closed; lets the server know when it may create the next instance.
+        std::shared_ptr<std::atomic<bool>> alive;
 
-        explicit Impl(HANDLE p) : pipe(p)
+        explicit Impl(HANDLE p, std::shared_ptr<std::atomic<bool>> aliveFlag = nullptr) : pipe(p), alive(std::move(aliveFlag))
         {
             readEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
             writeEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -167,6 +122,10 @@ namespace fastlook::core::ipc
             {
                 handleClosed = true;
                 CloseHandle(pipe);
+                if (alive)
+                {
+                    alive->store(false);
+                }
             }
         }
 
@@ -328,9 +287,9 @@ namespace fastlook::core::ipc
     namespace
     {
         // Wraps a freshly opened/accepted handle; closes it and returns nullopt when the events cannot be created.
-        std::optional<PipeConnection> Wrap(HANDLE h)
+        std::optional<PipeConnection> Wrap(HANDLE h, std::shared_ptr<std::atomic<bool>> alive = nullptr)
         {
-            auto impl = std::make_unique<PipeConnection::Impl>(h);
+            auto impl = std::make_unique<PipeConnection::Impl>(h, std::move(alive));
             if (!impl->Valid())
             {
                 return std::nullopt; // ~Impl closes the handle
@@ -342,44 +301,59 @@ namespace fastlook::core::ipc
     struct PipeServer::Impl
     {
         std::wstring name;
+        std::wstring user;                     // SID string of the current user
+        PSECURITY_DESCRIPTOR descriptor = nullptr; // built once: current user and SYSTEM only
         HANDLE pending = INVALID_HANDLE_VALUE; // created instance waiting for a client
         HANDLE cancelEvent = nullptr;
-        bool firstCreated = false;
+        std::shared_ptr<std::atomic<bool>> current; // liveness of the connection handed out last
         std::atomic<DWORD> error{0};
 
-        // The first instance claims the name (FIRST_PIPE_INSTANCE); later ones are created after the previous
-        // connection closed and report ERROR_PIPE_BUSY while it is still open. Only the current user and SYSTEM
-        // may open the pipe.
+        ~Impl()
+        {
+            if (descriptor)
+            {
+                LocalFree(descriptor);
+            }
+        }
+
+        bool Init()
+        {
+            user = UserSidString(0);
+            if (user.empty())
+            {
+                error = ERROR_NO_TOKEN;
+                return false;
+            }
+            std::wstring sddl = L"D:P(A;;GA;;;" + user + L")(A;;GA;;;SY)";
+            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &descriptor, nullptr))
+            {
+                error = GetLastError();
+                return false;
+            }
+            cancelEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+            if (!cancelEvent)
+            {
+                error = GetLastError();
+                return false;
+            }
+            return true;
+        }
+
+        // Every instance claims the name with FIRST_PIPE_INSTANCE: if anyone else holds it the call fails with
+        // ERROR_ACCESS_DENIED instead of silently joining a pipe whose DACL/instance limit we do not control.
         HANDLE CreateInstance() const
         {
-            std::vector<char> user;
-            LPWSTR sidString = nullptr;
-            if (!CurrentUserSid(user) || !ConvertSidToStringSidW(TokenUserSid(user), &sidString))
-            {
-                SetLastError(ERROR_NO_TOKEN);
-                return INVALID_HANDLE_VALUE;
-            }
-            std::wstring sddl = std::wstring(L"D:P(A;;GA;;;") + sidString + L")(A;;GA;;;SY)";
-            LocalFree(sidString);
-
-            SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, FALSE};
-            if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.c_str(), SDDL_REVISION_1, &sa.lpSecurityDescriptor, nullptr))
-            {
-                return INVALID_HANDLE_VALUE;
-            }
-            DWORD openMode = PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | (firstCreated ? 0 : FILE_FLAG_FIRST_PIPE_INSTANCE);
-            HANDLE h = CreateNamedPipeW(name.c_str(), openMode,
-                                        PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, kBufferBytes,
-                                        kBufferBytes, 0, &sa);
-            DWORD err = GetLastError();
-            LocalFree(sa.lpSecurityDescriptor);
-            SetLastError(err);
-            return h;
+            SECURITY_ATTRIBUTES sa{sizeof(sa), descriptor, FALSE};
+            return CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS, 1, kBufferBytes,
+                                    kBufferBytes, 0, &sa);
         }
 
         bool Cancelled() const { return WaitForSingleObject(cancelEvent, 0) == WAIT_OBJECT_0; }
 
-        // Makes sure `pending` is a created instance. False on cancel, timeout or a creation error (recorded in `error`).
+        // Makes sure `pending` is a created instance. The server serves one connection at a time, so while the
+        // previous one is alive this waits (it cannot create the next instance yet). False on cancel, timeout or a
+        // creation error (recorded in `error`).
         bool EnsurePending(Clock::time_point deadline)
         {
             while (pending == INVALID_HANDLE_VALUE)
@@ -388,24 +362,22 @@ namespace fastlook::core::ipc
                 {
                     return false;
                 }
+                if (current && current->load())
+                {
+                    DWORD left = RemainingMs(deadline);
+                    if (left == 0 || WaitForSingleObject(cancelEvent, std::min<DWORD>(left, 20)) == WAIT_OBJECT_0)
+                    {
+                        return false;
+                    }
+                    continue;
+                }
                 pending = CreateInstance();
-                if (pending != INVALID_HANDLE_VALUE)
+                if (pending == INVALID_HANDLE_VALUE)
                 {
-                    firstCreated = true;
-                    error = 0;
-                    return true;
-                }
-                DWORD err = GetLastError();
-                if (err != ERROR_PIPE_BUSY || !firstCreated)
-                {
-                    error = err;
+                    error = GetLastError(); // ACCESS_DENIED / PIPE_BUSY: somebody else holds the name
                     return false;
                 }
-                DWORD left = RemainingMs(deadline);
-                if (left == 0 || WaitForSingleObject(cancelEvent, std::min<DWORD>(left, 5)) == WAIT_OBJECT_0)
-                {
-                    return false;
-                }
+                error = 0;
             }
             return true;
         }
@@ -421,20 +393,13 @@ namespace fastlook::core::ipc
     PipeServer::PipeServer(std::wstring name) : m_impl(std::make_unique<Impl>())
     {
         m_impl->name = std::move(name);
-        m_impl->cancelEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (!m_impl->cancelEvent)
+        if (m_impl->Init())
         {
-            m_impl->error = GetLastError();
-            return;
-        }
-        m_impl->pending = m_impl->CreateInstance();
-        if (m_impl->pending == INVALID_HANDLE_VALUE)
-        {
-            m_impl->error = GetLastError();
-        }
-        else
-        {
-            m_impl->firstCreated = true;
+            m_impl->pending = m_impl->CreateInstance();
+            if (m_impl->pending == INVALID_HANDLE_VALUE)
+            {
+                m_impl->error = GetLastError();
+            }
         }
     }
 
@@ -530,7 +495,26 @@ namespace fastlook::core::ipc
             switch (outcome)
             {
             case Outcome::Connected:
-                return Wrap(std::exchange(m_impl->pending, INVALID_HANDLE_VALUE));
+            {
+                auto pidOf = [](HANDLE pipe, ULONG* pid) { return GetNamedPipeClientProcessId(pipe, pid) != FALSE; };
+                if (!PeerIsUser(m_impl->pending, pidOf, m_impl->user))
+                {
+                    // Not our user (or already gone): drop it and keep waiting for a real client.
+                    m_impl->DiscardPending();
+                    if (RemainingMs(deadline) == 0)
+                    {
+                        return std::nullopt;
+                    }
+                    break;
+                }
+                auto alive = std::make_shared<std::atomic<bool>>(true);
+                auto connection = Wrap(std::exchange(m_impl->pending, INVALID_HANDLE_VALUE), alive);
+                if (connection)
+                {
+                    m_impl->current = std::move(alive);
+                }
+                return connection;
+            }
             case Outcome::Stop:
                 return std::nullopt;
             case Outcome::ClientGone:
@@ -562,7 +546,8 @@ namespace fastlook::core::ipc
                                    FILE_FLAG_OVERLAPPED | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, nullptr);
             if (h != INVALID_HANDLE_VALUE)
             {
-                if (!ServerIsCurrentUser(h))
+                auto pidOf = [](HANDLE pipe, ULONG* pid) { return GetNamedPipeServerProcessId(pipe, pid) != FALSE; };
+                if (!PeerIsUser(h, pidOf, UserSidString(0)))
                 {
                     CloseHandle(h);
                     return std::nullopt;

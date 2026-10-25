@@ -276,3 +276,48 @@ TEST(IpcPipe, HugeTimeoutDoesNotOverflow)
     ASSERT_TRUE(cli->Send({.type = MsgType::Ping, .id = 1}, std::chrono::milliseconds::max()));
     EXPECT_TRUE(serverSide->Receive(std::chrono::milliseconds::max()));
 }
+
+TEST(IpcPipe, AcceptFailsWhenForeignInstanceHoldsNameAfterConnectionCloses)
+{
+    auto name = TestPipeName(L"foreign");
+    PipeServer srv(name);
+    {
+        auto [cli, serverSide] = Pair(srv, name);
+        ASSERT_TRUE(cli);
+        ASSERT_TRUE(serverSide);
+    }
+    // Somebody else claims the name in the gap between connections (default DACL, not ours).
+    HANDLE foreign = CreateNamedPipeW(name.c_str(), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 4096,
+                                      4096, 0, nullptr);
+    ASSERT_NE(foreign, INVALID_HANDLE_VALUE);
+    auto start = std::chrono::steady_clock::now();
+    EXPECT_FALSE(srv.Accept(5000ms));
+    EXPECT_LT(ElapsedMs(start), 1000);
+    EXPECT_NE(srv.Error(), 0u); // ERROR_PIPE_BUSY or ERROR_ACCESS_DENIED depending on the foreign instance
+    CloseHandle(foreign);
+}
+
+TEST(IpcPipe, AcceptWaitsWhilePreviousConnectionIsAlive)
+{
+    auto name = TestPipeName(L"onebyone");
+    PipeServer srv(name);
+    auto [cli, serverSide] = Pair(srv, name);
+    ASSERT_TRUE(cli);
+    ASSERT_TRUE(serverSide);
+
+    auto start = std::chrono::steady_clock::now();
+    EXPECT_FALSE(srv.Accept(150ms));
+    EXPECT_GE(ElapsedMs(start), 140);
+    EXPECT_EQ(srv.Error(), 0u);
+
+    // The next client is served as soon as the previous connection is closed.
+    std::optional<PipeConnection> next;
+    std::thread t([&] { next = srv.Accept(3000ms); });
+    std::this_thread::sleep_for(50ms);
+    serverSide->Close();
+    cli->Close();
+    auto second = ConnectPipe(name, 3000ms);
+    t.join();
+    EXPECT_TRUE(second);
+    EXPECT_TRUE(next);
+}
