@@ -21,4 +21,7 @@
   <data name="NoCodec" xml:space="preserve">
     <value>No codec is installed for this image format</value>
   </data>
+  <data name="SvgParseFailed" xml:space="preserve">
+    <value>The SVG could not be parsed</value>
+  </data>
 </root>

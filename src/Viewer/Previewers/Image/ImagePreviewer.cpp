@@ -1,11 +1,16 @@
 #include "pch.h"
 #include "Previewers/Image/ImagePreviewer.h"
 
+#include <algorithm>
+#include <cwctype>
+
 #include "Diagnostics/Log.h"
 #include "Diagnostics/PerfLog.h"
+#include "Graphics/DeviceResources.h"
 #include "Imaging/DecodeMath.h"
 #include "Previewers/Factories.h"
 #include "Util/Async.h"
+#include "Util/Str.h"
 
 namespace fastlook::viewer
 {
@@ -16,6 +21,13 @@ namespace fastlook::viewer
         uint64_t Area(core::SizeU size)
         {
             return static_cast<uint64_t>(size.w) * size.h;
+        }
+
+        bool IsSvg(std::filesystem::path const& path)
+        {
+            auto ext = path.extension().wstring();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+            return ext == L".svg";
         }
     }
 
@@ -32,16 +44,58 @@ namespace fastlook::viewer
         core::SizeU const target{static_cast<uint32_t>(std::ceil(ctx->maxContentDip.Width * ctx->scale)),
                                  static_cast<uint32_t>(std::ceil(ctx->maxContentDip.Height * ctx->scale))};
 
+        bool const svg = IsSvg(m_path);
         auto wic = WicFactory(); // taken on the UI thread, see DecodeToSize
+        winrt::com_ptr<ID2D1Device5> d2d;
+        if (svg)
+        {
+            d2d.copy_from(DeviceResources::Get().D2DDevice()); // likewise: never fetched on the background thread
+        }
         co_await winrt::resume_background();
-        DecodedImage decoded = DecodeToSize(m_path, target, stop.get_token(), std::move(wic));
-        if (cancel() || !decoded.bitmap)
+        std::shared_ptr<SvgImage> vector;
+        std::shared_ptr<AnimatedImage> animation;
+        DecodedImage decoded;
+        if (svg)
+        {
+            vector = SvgImage::Load(m_path, std::move(d2d));
+        }
+        else
+        {
+            animation = AnimatedImage::Open(m_path, wic, stop.get_token()); // null: still image (or a canvas over 4096x4096: first frame)
+            if (!animation)
+            {
+                decoded = DecodeToSize(m_path, target, stop.get_token(), std::move(wic));
+            }
+        }
+        if (cancel() || (!svg && !animation && !decoded.bitmap))
         {
             co_return;
         }
 
         if (!co_await ResumeOn(ui))
         {
+            co_return;
+        }
+        if (animation)
+        {
+            m_animation = std::move(animation);
+            m_native = m_animation->Canvas();
+            m_preferred = {static_cast<float>(m_native.w / ctx->scale), static_cast<float>(m_native.h / ctx->scale)};
+            co_return;
+        }
+        if (vector)
+        {
+            auto const intrinsic = vector->IntrinsicSize();
+            m_native = {static_cast<uint32_t>(std::ceil(intrinsic.w * ctx->scale)), static_cast<uint32_t>(std::ceil(intrinsic.h * ctx->scale))};
+            m_preferred = {static_cast<float>(intrinsic.w), static_cast<float>(intrinsic.h)};
+            m_baseSize = core::ComputeDecodeSize(m_native, {ctx->maxContentDip.Width, ctx->maxContentDip.Height}, ctx->scale);
+            auto rendered = vector->Render(m_baseSize);
+            if (!rendered)
+            {
+                throw PreviewError{std::wstring{Str(L"Image", L"DecodeFailed")}, std::nullopt};
+            }
+            m_svg = std::move(vector);
+            m_svgBase = rendered;
             co_return;
         }
         m_native = core::OrientedSize(decoded.native, decoded.orientation);
@@ -60,8 +114,21 @@ namespace fastlook::viewer
     winrt::Microsoft::UI::Xaml::UIElement ImagePreviewer::View()
     {
         m_zoomView = std::make_unique<ZoomPanView>();
-        m_zoomView->SetSource(m_baseSource, m_native, m_ctx->scale);
-        m_zoomView->zoomSettled = [this](double zoom) { OnZoomSettled(zoom); };
+        if (m_animation)
+        {
+            // The bitmap already holds the full canvas: zoom needs no re-decode, and playback starts only now (preloaded items stay still).
+            m_zoomView->SetSource(m_animation->Attach(m_ctx->ui), m_native, m_ctx->scale);
+        }
+        else if (m_svg)
+        {
+            m_zoomView->SetSource(m_svgBase, m_native, m_ctx->scale);
+            m_zoomView->zoomSettled = [this](double zoom) { OnSvgZoomSettled(zoom); };
+        }
+        else
+        {
+            m_zoomView->SetSource(m_baseSource, m_native, m_ctx->scale);
+            m_zoomView->zoomSettled = [this](double zoom) { OnZoomSettled(zoom); };
+        }
         return m_zoomView->Root();
     }
 
@@ -77,6 +144,14 @@ namespace fastlook::viewer
     {
         m_redecodeStop.request_stop();
         ++m_generation;
+        if (m_animation)
+        {
+            m_animation->Stop(); // no timer ticks or decoding while hidden
+            m_animation.reset();
+        }
+        m_svg.reset();
+        m_svgBase = nullptr;
+        m_svgZoom = nullptr;
         m_zoomView.reset();
         CloseZoomSource();
         if (m_baseSource)
@@ -119,6 +194,41 @@ namespace fastlook::viewer
             return;
         }
         Redecode(target, m_redecodeStop.get_token(), generation);
+    }
+
+    void ImagePreviewer::OnSvgZoomSettled(double zoom)
+    {
+        if (!m_svg || !m_zoomView)
+        {
+            return;
+        }
+        if (zoom <= 1.001)
+        {
+            m_zoomView->ReplaceSource(m_svgBase);
+            m_svgZoom = nullptr;
+            return;
+        }
+
+        // Vector: sharp at displayed size x zoom, but at most twice the viewport in each dimension.
+        auto const fitted = m_zoomView->FittedDip();
+        auto const viewport = m_zoomView->ViewportDip();
+        double const scale = m_ctx->scale;
+        double const w = fitted.Width * zoom * scale;
+        double const h = fitted.Height * zoom * scale;
+        double const k = std::min({1.0, viewport.Width * 2.0 * scale / w, viewport.Height * 2.0 * scale / h});
+        core::SizeU const target{static_cast<uint32_t>(std::max(1.0, std::round(w * k))), static_cast<uint32_t>(std::max(1.0, std::round(h * k)))};
+        if (Area(target) <= Area(m_baseSize))
+        {
+            m_zoomView->ReplaceSource(m_svgBase);
+            m_svgZoom = nullptr;
+            return;
+        }
+        core::perf::Mark("svg-rerender", "w=" + std::to_string(target.w) + " h=" + std::to_string(target.h));
+        if (auto rendered = m_svg->Render(target))
+        {
+            m_zoomView->ReplaceSource(rendered);
+            m_svgZoom = rendered;
+        }
     }
 
     void ImagePreviewer::CloseZoomSource()

@@ -21,4 +21,7 @@
   <data name="NoCodec" xml:space="preserve">
     <value>Для этого формата не установлен кодек</value>
   </data>
+  <data name="SvgParseFailed" xml:space="preserve">
+    <value>Не удалось разобрать SVG</value>
+  </data>
 </root>

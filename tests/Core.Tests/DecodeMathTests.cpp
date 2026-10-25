@@ -30,3 +30,32 @@ TEST(DecodeMath, OrientationTable)
         EXPECT_EQ(ExifFlipsHorizontally(o), flip[o]) << o;
     }
 }
+
+TEST(DecodeMath, FrameDelayNormalization)
+{
+    EXPECT_EQ(NormalizeFrameDelayMs(0), 100u);
+    EXPECT_EQ(NormalizeFrameDelayMs(10), 100u);
+    EXPECT_EQ(NormalizeFrameDelayMs(19), 100u);
+    EXPECT_EQ(NormalizeFrameDelayMs(20), 20u);
+    EXPECT_EQ(NormalizeFrameDelayMs(70), 70u);
+}
+
+TEST(DecodeMath, AnimationCanvasLimit)
+{
+    EXPECT_TRUE(CanAnimateCanvas({64, 48}));
+    EXPECT_TRUE(CanAnimateCanvas({4096, 4096}));
+    EXPECT_FALSE(CanAnimateCanvas({4097, 100}));
+    EXPECT_FALSE(CanAnimateCanvas({100, 4097}));
+    EXPECT_FALSE(CanAnimateCanvas({0, 10}));
+}
+
+TEST(DecodeMath, SvgIntrinsicSize)
+{
+    EXPECT_EQ(SvgIntrinsicSize(320, 240, SizeD{10, 10}), (SizeD{320, 240}));
+    EXPECT_EQ(SvgIntrinsicSize(std::nullopt, std::nullopt, SizeD{24, 12}), (SizeD{24, 12}));
+    EXPECT_EQ(SvgIntrinsicSize(200, std::nullopt, SizeD{24, 12}), (SizeD{200, 100}));
+    EXPECT_EQ(SvgIntrinsicSize(std::nullopt, 100, SizeD{24, 12}), (SizeD{200, 100}));
+    EXPECT_EQ(SvgIntrinsicSize(std::nullopt, std::nullopt, std::nullopt), (SizeD{512, 512}));
+    EXPECT_EQ(SvgIntrinsicSize(0, -5, SizeD{0, 0}), (SizeD{512, 512}));
+    EXPECT_EQ(SvgIntrinsicSize(100000, 50000, std::nullopt), (SizeD{16384, 8192}));
+}

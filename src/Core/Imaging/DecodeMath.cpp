@@ -55,4 +55,48 @@ namespace fastlook::core
     {
         return Valid(exifOrientation) && kFlip[exifOrientation];
     }
+
+    uint32_t NormalizeFrameDelayMs(uint32_t delayMs)
+    {
+        return delayMs < 20 ? 100 : delayMs;
+    }
+
+    bool CanAnimateCanvas(SizeU canvas)
+    {
+        return canvas.w > 0 && canvas.h > 0 && canvas.w <= 4096 && canvas.h <= 4096;
+    }
+
+    SizeD SvgIntrinsicSize(std::optional<double> width, std::optional<double> height, std::optional<SizeD> viewBox)
+    {
+        constexpr double kDefault = 512.0;
+        constexpr double kMax = 16384.0;
+        auto const valid = [](std::optional<double> v) { return v && *v > 0.0 && std::isfinite(*v); };
+        bool const hasBox = viewBox && viewBox->w > 0.0 && viewBox->h > 0.0 && std::isfinite(viewBox->w) && std::isfinite(viewBox->h);
+        double const aspect = hasBox ? viewBox->w / viewBox->h : 1.0;
+
+        SizeD size{kDefault, kDefault};
+        if (valid(width) && valid(height))
+        {
+            size = {*width, *height};
+        }
+        else if (valid(width))
+        {
+            size = {*width, hasBox ? *width / aspect : *width};
+        }
+        else if (valid(height))
+        {
+            size = {hasBox ? *height * aspect : *height, *height};
+        }
+        else if (hasBox)
+        {
+            size = *viewBox;
+        }
+
+        double const largest = std::max(size.w, size.h);
+        if (largest > kMax)
+        {
+            size = {size.w * kMax / largest, size.h * kMax / largest};
+        }
+        return {std::max(size.w, 1.0), std::max(size.h, 1.0)};
+    }
 }
