@@ -36,17 +36,17 @@ namespace fastlook::core
     private:
         struct Thread;
 
-        template <class R>
+        template <class R, class F>
         struct Job
         {
-            explicit Job(std::function<R()> f) : fn(std::move(f)) {}
+            explicit Job(F&& f) : fn(std::move(f)) {}
 
             void Execute()
             {
                 std::optional<R> value;
                 try
                 {
-                    value.emplace(fn());
+                    value.emplace(std::invoke(fn));
                 }
                 catch (...)
                 {
@@ -57,21 +57,17 @@ namespace fastlook::core
                 cv.notify_all();
             }
 
-            bool WaitFor(std::chrono::milliseconds timeout)
-            {
-                std::unique_lock lock(mutex);
-                return cv.wait_for(lock, timeout, [this] { return done; });
-            }
-
-            std::function<R()> fn;
+            F fn;
             std::mutex mutex;
             std::condition_variable cv;
             bool done = false;
             std::optional<R> result;
         };
 
-        std::shared_ptr<Thread> EnsureThread();
-        static void Post(Thread& thread, std::function<void()> work);
+        // Current worker thread, spawned if needed; nullptr when the abandoned cap is reached, the thread cannot
+        // be started, or it is not ready by the deadline (then it is abandoned).
+        std::shared_ptr<Thread> EnsureThread(std::chrono::steady_clock::time_point deadline);
+        static bool Post(Thread& thread, std::function<void()> work);
         static void Poison(Thread& thread, bool abandoned);
         void Retire(std::shared_ptr<Thread> const& thread);
 
@@ -84,21 +80,22 @@ namespace fastlook::core
     auto ShellWorker::Run(F&& fn, std::chrono::milliseconds timeout) -> std::optional<std::invoke_result_t<F>>
     {
         using R = std::invoke_result_t<F>;
+        using Callable = std::decay_t<F>;
         static_assert(!std::is_void_v<R>, "ShellWorker::Run needs a result type");
 
-        if (AbandonedCount() >= kMaxAbandoned)
-            return std::nullopt; // hung Explorer: fail fast, no unbounded thread growth
-        auto job = std::make_shared<Job<R>>(std::function<R()>(std::forward<F>(fn)));
-        auto thread = EnsureThread();
-        if (!thread)
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        auto job = std::make_shared<Job<R, Callable>>(Callable(std::forward<F>(fn)));
+        auto thread = EnsureThread(deadline); // also enforces the abandoned cap: hung Explorer fails fast
+        if (!thread || !Post(*thread, [job] { job->Execute(); }))
             return std::nullopt;
-        Post(*thread, [job] { job->Execute(); });
-        if (job->WaitFor(timeout))
+
+        std::unique_lock lock(job->mutex);
+        if (!job->cv.wait_until(lock, deadline, [&] { return job->done; }))
         {
-            std::lock_guard lock(job->mutex);
-            return std::move(job->result);
+            // Completion and abandonment are decided under the job lock: a job that just finished keeps its thread.
+            Retire(thread);
+            return std::nullopt;
         }
-        Retire(thread);
-        return std::nullopt;
+        return std::move(job->result);
     }
 }

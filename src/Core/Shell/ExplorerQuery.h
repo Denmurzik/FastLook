@@ -29,6 +29,12 @@ namespace fastlook::core
         uint32_t index = 0;
     };
 
+    // True for the errors a dead Explorer (restart, crash) produces on cached COM proxies.
+    bool IsExplorerDisconnected(HRESULT hr) noexcept;
+
+    // Releases the per-thread COM state (cached IShellWindows). Call on the STA thread before CoUninitialize.
+    void ReleaseExplorerThreadState() noexcept;
+
     // All functions below run on an STA thread (ShellWorker) and may block on Explorer.
 
     // Fast phase: selection + focus of the active tab of the foreground Explorer window (or the desktop).

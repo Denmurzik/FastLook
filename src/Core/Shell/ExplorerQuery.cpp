@@ -65,11 +65,6 @@ namespace fastlook::core
             void* m_raw = nullptr;
         };
 
-        bool IsDisconnected(HRESULT hr) noexcept
-        {
-            return hr == RPC_E_DISCONNECTED || hr == RPC_S_SERVER_UNAVAILABLE || hr == CO_E_OBJNOTCONNECTED;
-        }
-
         // One IShellWindows per STA thread; dropped after Explorer restarts (the proxy is dead then).
         ComPtr<IShellWindows>& CachedShellWindows()
         {
@@ -131,7 +126,13 @@ namespace fastlook::core
                 index.vt = VT_I4;
                 index.lVal = i;
                 ComPtr<IDispatch> disp;
-                if (FAILED(windows->Item(index, &disp)) || !disp)
+                HRESULT ih = windows->Item(index, &disp);
+                if (IsExplorerDisconnected(ih))
+                {
+                    hr = ih;
+                    return nullptr;
+                }
+                if (FAILED(ih) || !disp)
                     continue;
                 ComPtr<IWebBrowserApp> app;
                 if (FAILED(disp.As(&app)))
@@ -160,22 +161,26 @@ namespace fastlook::core
             HWND viewWindow = nullptr;
         };
 
-        bool OpenView(IShellBrowser* browser, HWND explorer, ViewContext& ctx)
+        HRESULT OpenView(IShellBrowser* browser, HWND explorer, ViewContext& ctx)
         {
             ctx.explorer = explorer;
-            if (FAILED(browser->QueryActiveShellView(&ctx.view)) || !ctx.view)
-                return false;
-            if (FAILED(ctx.view.As(&ctx.folderView)))
-                return false;
+            HRESULT hr = browser->QueryActiveShellView(&ctx.view);
+            if (FAILED(hr) || !ctx.view)
+                return FAILED(hr) ? hr : E_FAIL;
+            hr = ctx.view.As(&ctx.folderView);
+            if (FAILED(hr))
+                return hr;
             ctx.view->GetWindow(&ctx.viewWindow);
             ComPtr<IPersistFolder2> persist;
-            if (FAILED(ctx.folderView->GetFolder(IID_PPV_ARGS(&persist))))
-                return false;
+            hr = ctx.folderView->GetFolder(IID_PPV_ARGS(&persist));
+            if (FAILED(hr))
+                return hr;
             PIDLIST_ABSOLUTE raw = nullptr;
-            if (FAILED(persist->GetCurFolder(&raw)) || !raw)
-                return false;
+            hr = persist->GetCurFolder(&raw);
+            if (FAILED(hr) || !raw)
+                return FAILED(hr) ? hr : E_FAIL;
             Pidl pidl(reinterpret_cast<void*>(raw));
-            return SUCCEEDED(SHBindToObject(nullptr, pidl.Absolute(), nullptr, IID_PPV_ARGS(&ctx.folder)));
+            return SHBindToObject(nullptr, pidl.Absolute(), nullptr, IID_PPV_ARGS(&ctx.folder));
         }
 
         // One attempt: pattern is shared by the lookup of a foreground window and of a known Explorer HWND.
@@ -213,13 +218,8 @@ namespace fastlook::core
                     hr = E_FAIL;
                 return false;
             }
-            if (!OpenView(browser.Get(), explorer, ctx))
-            {
-                hr = E_FAIL;
-                return false;
-            }
-            hr = S_OK;
-            return true;
+            hr = OpenView(browser.Get(), explorer, ctx);
+            return SUCCEEDED(hr);
         }
 
         bool OpenViewFor(HWND topLevel, bool isDesktop, ViewContext& ctx)
@@ -229,7 +229,7 @@ namespace fastlook::core
             HRESULT hr = S_OK;
             if (TryOpen(topLevel, isDesktop, ctx, hr))
                 return true;
-            if (IsDisconnected(hr))
+            if (IsExplorerDisconnected(hr))
             {
                 ResetShellWindows(); // Explorer restarted
                 ctx = {};
@@ -318,6 +318,17 @@ namespace fastlook::core
                 return std::nullopt; // scrolled out of view
             return RectI{pt.x, pt.y, iconSize, iconSize};
         }
+    }
+
+    bool IsExplorerDisconnected(HRESULT hr) noexcept
+    {
+        return hr == RPC_E_DISCONNECTED || hr == RPC_E_SERVER_DIED || hr == RPC_E_SERVER_DIED_DNE || hr == CO_E_OBJNOTCONNECTED ||
+               hr == HRESULT_FROM_WIN32(RPC_S_SERVER_UNAVAILABLE) || hr == HRESULT_FROM_WIN32(RPC_S_CALL_FAILED);
+    }
+
+    void ReleaseExplorerThreadState() noexcept
+    {
+        ResetShellWindows();
     }
 
     std::optional<ExplorerSnapshot> QueryExplorer(HWND foreground, bool isDesktop)

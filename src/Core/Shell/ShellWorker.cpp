@@ -1,5 +1,7 @@
 #include "Shell/ShellWorker.h"
 
+#include "Shell/ExplorerQuery.h"
+
 #include <Windows.h>
 #include <objbase.h>
 
@@ -21,7 +23,8 @@ namespace fastlook::core
         std::mutex mutex;
         std::condition_variable readyCv;
         bool ready = false;
-        bool poisoned = false;
+        bool initFailed = false; // COM could not be initialised: the thread exits at once
+        bool poisoned = false;   // takes no new jobs; also set when the thread dies by itself
         bool abandoned = false; // poisoned because of a timeout: counted in abandonedCount until the thread exits
         DWORD threadId = 0;
         std::deque<std::function<void()>> queue;
@@ -52,11 +55,12 @@ namespace fastlook::core
             {
                 std::lock_guard lock(mutex);
                 threadId = GetCurrentThreadId();
+                initFailed = !comOk;
                 ready = true;
             }
             readyCv.notify_all();
 
-            bool exit = false;
+            bool exit = !comOk;
             while (!exit)
             {
                 std::function<void()> work;
@@ -74,8 +78,13 @@ namespace fastlook::core
                 }
             }
             if (comOk)
+            {
+                ReleaseExplorerThreadState(); // COM objects must be released before the apartment goes away
                 CoUninitialize();
+            }
             std::lock_guard lock(mutex);
+            poisoned = true; // WM_QUIT or a failed GetMessage ends the thread without a Poison call
+            queue.clear();
             if (abandoned)
                 abandonedCount->fetch_sub(1);
         }
@@ -99,11 +108,22 @@ namespace fastlook::core
         return m_abandoned->load();
     }
 
-    std::shared_ptr<ShellWorker::Thread> ShellWorker::EnsureThread()
+    std::shared_ptr<ShellWorker::Thread> ShellWorker::EnsureThread(std::chrono::steady_clock::time_point deadline)
     {
         std::lock_guard lock(m_mutex);
+        if (m_abandoned->load() >= kMaxAbandoned)
+            return nullptr;
         if (m_thread)
-            return m_thread;
+        {
+            bool alive;
+            {
+                std::lock_guard tlock(m_thread->mutex);
+                alive = !m_thread->poisoned;
+            }
+            if (alive)
+                return m_thread;
+            m_thread.reset();
+        }
         auto thread = std::make_shared<Thread>();
         thread->abandonedCount = m_abandoned;
         try
@@ -115,20 +135,30 @@ namespace fastlook::core
             return nullptr;
         }
         std::unique_lock tlock(thread->mutex);
-        thread->readyCv.wait(tlock, [&] { return thread->ready; });
+        if (!thread->readyCv.wait_until(tlock, deadline, [&] { return thread->ready; }))
+        {
+            tlock.unlock();
+            Poison(*thread, true); // stuck while starting: counts as abandoned, exits when it gets going
+            return nullptr;
+        }
+        if (thread->initFailed)
+            return nullptr;
         m_thread = thread;
         return thread;
     }
 
-    void ShellWorker::Post(Thread& thread, std::function<void()> work)
+    bool ShellWorker::Post(Thread& thread, std::function<void()> work)
     {
         DWORD id;
         {
             std::lock_guard lock(thread.mutex);
+            if (thread.poisoned)
+                return false;
             thread.queue.push_back(std::move(work));
             id = thread.threadId;
         }
         PostThreadMessageW(id, kWakeMessage, 0, 0);
+        return true;
     }
 
     void ShellWorker::Poison(Thread& thread, bool abandoned)

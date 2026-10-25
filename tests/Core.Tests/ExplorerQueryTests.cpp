@@ -8,6 +8,8 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
+#include <vector>
 #include <string>
 
 #include "Shell/ExplorerQuery.h"
@@ -91,6 +93,20 @@ namespace
     }
 }
 
+TEST(ExplorerQuery, DisconnectedPredicate)
+{
+    EXPECT_TRUE(IsExplorerDisconnected(RPC_E_DISCONNECTED));
+    EXPECT_TRUE(IsExplorerDisconnected(RPC_E_SERVER_DIED));
+    EXPECT_TRUE(IsExplorerDisconnected(RPC_E_SERVER_DIED_DNE));
+    EXPECT_TRUE(IsExplorerDisconnected(CO_E_OBJNOTCONNECTED));
+    EXPECT_TRUE(IsExplorerDisconnected(HRESULT_FROM_WIN32(RPC_S_SERVER_UNAVAILABLE))); // 0x800706BA, what a dead proxy returns
+    EXPECT_TRUE(IsExplorerDisconnected(HRESULT_FROM_WIN32(RPC_S_CALL_FAILED)));
+    EXPECT_FALSE(IsExplorerDisconnected(S_OK));
+    EXPECT_FALSE(IsExplorerDisconnected(E_FAIL));
+    EXPECT_FALSE(IsExplorerDisconnected(E_ACCESSDENIED));
+    EXPECT_FALSE(IsExplorerDisconnected(static_cast<HRESULT>(RPC_S_SERVER_UNAVAILABLE))); // the bare Win32 code is not an HRESULT
+}
+
 TEST(ExplorerQuery, SelectionFocusAndEnumeration)
 {
     if (!GetEnvironmentVariableW(L"FASTLOOK_E2E", nullptr, 0))
@@ -107,7 +123,7 @@ TEST(ExplorerQuery, SelectionFocusAndEnumeration)
     HWND hwnd = nullptr;
     for (int i = 0; i < 50 && !hwnd; ++i)
     {
-        auto found = worker.Run([&] { return FindExplorerWindow(dir).hwnd; }, 3000ms);
+        auto found = worker.Run([dir] { return FindExplorerWindow(dir).hwnd; }, 3000ms);
         if (found)
             hwnd = *found;
         if (!hwnd)
@@ -115,22 +131,29 @@ TEST(ExplorerQuery, SelectionFocusAndEnumeration)
     }
     ASSERT_NE(hwnd, nullptr) << "Explorer window did not appear";
 
-    auto quit = [&] {
-        worker.Run(
-            [&] {
-                if (auto w = FindExplorerWindow(dir); w.browser)
-                    w.browser->Quit();
-                return 0;
-            },
-            3000ms);
-    };
+    // Closes the Explorer window on every exit path, including failed ASSERTs.
+    struct CloseGuard
+    {
+        ShellWorker& worker;
+        std::wstring dir;
+        ~CloseGuard()
+        {
+            worker.Run(
+                [dir = dir] {
+                    if (auto w = FindExplorerWindow(dir); w.browser)
+                        w.browser->Quit();
+                    return 0;
+                },
+                3000ms);
+        }
+    } closeGuard{worker, dir};
 
     // Wait for the view to populate, then select b and c.
     bool selected = false;
     for (int i = 0; i < 50 && !selected; ++i)
     {
         auto r = worker.Run(
-            [&] {
+            [dir, hwnd] {
                 auto w = FindExplorerWindow(dir);
                 if (!w.browser)
                     return false;
@@ -144,13 +167,9 @@ TEST(ExplorerQuery, SelectionFocusAndEnumeration)
         if (!selected)
             Sleep(200);
     }
-    if (!selected)
-    {
-        quit();
-        FAIL() << "could not select items";
-    }
+    ASSERT_TRUE(selected) << "could not select items";
 
-    auto snap = worker.Run([&] { return QueryExplorer(hwnd, false); }, 3000ms);
+    auto snap = worker.Run([hwnd] { return QueryExplorer(hwnd, false); }, 3000ms);
     ASSERT_TRUE(snap && *snap);
     auto const& s = **snap;
     EXPECT_EQ(s.explorer, hwnd);
@@ -162,16 +181,15 @@ TEST(ExplorerQuery, SelectionFocusAndEnumeration)
     EXPECT_EQ(s.totalItems, 3u);
     EXPECT_NE(s.monitor, nullptr);
 
-    auto list = worker.Run([&] { return EnumerateFolder(hwnd, false, ipc::Item{(std::filesystem::path(dir) / L"b.txt").wstring()}); }, 3000ms);
+    auto list = worker.Run([dir, hwnd] { return EnumerateFolder(hwnd, false, ipc::Item{(std::filesystem::path(dir) / L"b.txt").wstring()}); }, 3000ms);
     ASSERT_TRUE(list && *list);
     ASSERT_EQ((*list)->items.size(), 3u);
     EXPECT_EQ((*list)->index, 1u);
     EXPECT_EQ(Name((*list)->items[0]), L"a.txt");
 
-    auto sel = worker.Run([&] { return SelectInExplorer(hwnd, false, ipc::Item{(std::filesystem::path(dir) / L"a.txt").wstring()}); }, 3000ms);
+    auto sel = worker.Run([dir, hwnd] { return SelectInExplorer(hwnd, false, ipc::Item{(std::filesystem::path(dir) / L"a.txt").wstring()}); }, 3000ms);
     EXPECT_TRUE(sel && *sel);
-    auto after = worker.Run([&] { return QueryExplorer(hwnd, false); }, 3000ms);
-    quit();
+    auto after = worker.Run([hwnd] { return QueryExplorer(hwnd, false); }, 3000ms);
     ASSERT_TRUE(after && *after);
     ASSERT_EQ((*after)->selection.size(), 1u);
     EXPECT_EQ(Name((*after)->selection[0]), L"a.txt");
