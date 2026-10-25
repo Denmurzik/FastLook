@@ -376,6 +376,8 @@ function Stop-Daemon {
     if ($script:Daemon) { $null = $script:Daemon.WaitForExit(3000) }
     Get-Process -Name 'FastLook*' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
+$script:DaemonDeathCounted = $false
+function Count-DaemonDeath { if (-not $script:DaemonDeathCounted) { $script:DaemonDeathCounted = $true; $script:Crashes++ } }
 function Daemon-Alive { $script:Daemon -and -not $script:Daemon.HasExited }
 function LogText { if (Test-Path $logFile) { try { [IO.File]::ReadAllText($logFile) } catch { '' } } else { '' } }
 
@@ -474,7 +476,7 @@ try {
         $noForeground = 0; $focusLost = 0; $notHidden = 0; $lastPid = 0; $blockedIters = 0; $aborted = $false
         $firstShot = $false
         for ($i = 1; $i -le $Iterations; $i++) {
-            if (-not (Daemon-Alive)) { $script:Crashes++; Note "daemon died before iteration $i"; break }
+            if (-not (Daemon-Alive)) { Count-DaemonDeath; Note "daemon died before iteration $i"; break }
             if (-not (Focus-Explorer $explorerWin $aName)) { Note "iteration ${i}: could not focus Explorer"; $aborted = $true; break }
             $t0 = Press-Space
             if ($null -eq $t0) { $blockedIters++; Pause 300; continue }
@@ -499,7 +501,7 @@ try {
             Pause 120
             $h0 = Press-Space
             $hidden = Wait-ViewerHidden 1500
-            if ($hidden) { $hideMs.Add((Ms $h0 ([FastLookWin32]::QpcNow()))) }
+            if ($null -ne $h0 -and $hidden) { $hideMs.Add((Ms $h0 ([FastLookWin32]::QpcNow()))) }
             else { $notHidden++; Note ("TRACE iter {0}: second Space did not hide; fg=[{1}]" -f $i, (Desc (Get-ForegroundHwnd))); Close-Preview }
             if (-not (Wait-Until { (Get-ForegroundHwnd) -eq $exHwnd } 800 10)) { $focusLost++; Note ("TRACE iter {0}: focus not back in Explorer; fg=[{1}]" -f $i, (Desc (Get-ForegroundHwnd))) }
             Pause 150
@@ -580,20 +582,27 @@ try {
         Begin-Section
         # ---- 4. rename: F2, Z, Space, Y, Enter ----
         $null = Focus-Explorer $explorerWin 'd.txt'
+        $blockedBeforeF2 = $script:Blocked
         Tap $VK.F2 -List; Pause 500
-        $renLayout = Ensure-Layout '00000409'
-        Tap 0x5A; Pause 60
-        $rt0 = Press-Space -Anywhere
-        $rv = Wait-ViewerVisible 900
-        Pause 60
-        Tap 0x59; Pause 100
-        Tap $VK.Enter; Pause 700
-        $renamed = [bool](Get-ChildItem $folder -Filter '? ?.txt' -ErrorAction SilentlyContinue)
-        $renamedTo = (Get-ChildItem $folder -Filter '? ?.txt' -ErrorAction SilentlyContinue | Select-Object -First 1).Name
-        if ($rv) { Close-Preview; $null = Focus-Explorer $explorerWin $aName }
-        Check 'rename: no Viewer window on Space in the rename box' (-not $rv)
-        Check 'rename: the Space reached the edit box (d.txt became "<letter> <letter>.txt")' $renamed ("(English layout in the edit box: $renLayout; files: {0})" -f ((Get-ChildItem $folder).Name -join ', '))
-        if ($renamed) { Rename-Item (Join-Path $folder $renamedTo) 'd.txt' }
+        if ($script:Blocked -gt $blockedBeforeF2) {
+            Skip 'rename: no Viewer window on Space in the rename box' 'F2 was blocked (foreground/focus not the Explorer list); the rest of the section was not sent'
+            Skip 'rename: the Space reached the edit box' 'F2 was blocked; the rest of the section was not sent'
+        }
+        else {
+            $renLayout = Ensure-Layout '00000409'
+            Tap 0x5A; Pause 60
+            $rt0 = Press-Space -Anywhere
+            $rv = Wait-ViewerVisible 900
+            Pause 60
+            Tap 0x59; Pause 100
+            Tap $VK.Enter; Pause 700
+            $renamed = [bool](Get-ChildItem $folder -Filter '? ?.txt' -ErrorAction SilentlyContinue)
+            $renamedTo = (Get-ChildItem $folder -Filter '? ?.txt' -ErrorAction SilentlyContinue | Select-Object -First 1).Name
+            if ($rv) { Close-Preview; $null = Focus-Explorer $explorerWin $aName }
+            Check 'rename: no Viewer window on Space in the rename box' (-not $rv)
+            Check 'rename: the Space reached the edit box (d.txt became "<letter> <letter>.txt")' $renamed ("(English layout in the edit box: $renLayout; files: {0})" -f ((Get-ChildItem $folder).Name -join ', '))
+            if ($renamed) { Rename-Item (Join-Path $folder $renamedTo) 'd.txt' }
+        }
 
         Begin-Section
         # ---- 5. address bar ----
@@ -688,7 +697,7 @@ try {
             Chord $VK.Ctrl 0x32; Pause 600   # Ctrl+2: second tab
             $secondActive = $false
             foreach ($w in $shell.Windows()) { try { if ([int64]$w.HWND -eq [int64]$exHwnd -and (Local-Path $w.LocationURL) -ieq $folder2.TrimEnd('\')) { $secondActive = $true } } catch { } }
-            if ($secondActive -and (Get-ForegroundHwnd) -eq $exHwnd) { Chord $VK.Ctrl 0x57; Pause 700 }   # Ctrl+W: close it; the first tab stays
+            if ($secondActive -and (Get-ForegroundHwnd) -eq $exHwnd -and (Get-WindowTitle -Hwnd $exHwnd) -like '*folder2*') { Chord $VK.Ctrl 0x57; Pause 700 }   # Ctrl+W: close it; the first tab stays
             else { Note 'tabs: second tab not found afterwards, Ctrl+W not sent (it is closed with the window in finally)' }
         }
 
@@ -759,7 +768,7 @@ try {
         Begin-Section
         # ---- hook survival (no Explorer restart: too disruptive) and daemon health ----
         Skip 'explorer restart: hook survives taskkill explorer' 'not run (too disruptive); the TaskbarCreated rehook above is the closest proxy'
-        if (-not (Daemon-Alive)) { $script:Crashes++ }
+        if (-not (Daemon-Alive)) { Count-DaemonDeath }
         Check 'daemon survived the whole run' (Daemon-Alive)
         $pidNow = if (Daemon-Alive) { $script:Daemon.Id } else { 0 }
 
@@ -799,7 +808,7 @@ finally {
         if (Test-Path $perfLog) { Copy-Item $perfLog (Join-Path $keep 'perf.log') -Force }
     } catch { }
     $leftProc = @(Get-Process -Name 'FastLook*' -ErrorAction SilentlyContinue)
-    $leftWin = @($script:Opened | Where-Object { [FastLookWin32]::Exists($_.Hwnd) })
+    $leftWin = @($script:Opened | Where-Object { -not $_.Shared -and [FastLookWin32]::Exists($_.Hwnd) })
     $leftTabs = 0
     try { foreach ($w in $shell.Windows()) { try { if ((Local-Path $w.LocationURL).StartsWith($tmp.TrimEnd('\'), 'OrdinalIgnoreCase')) { $leftTabs++ } } catch { } } } catch { }
     Write-Host ("cleanup: FastLook processes left={0}, test Explorer windows left={1}, shell windows/tabs still showing the temp folders={2}" -f $leftProc.Count, $leftWin.Count, $leftTabs)
