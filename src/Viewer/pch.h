@@ -32,3 +32,4 @@
 // through this header, so each such type's implementation header is listed here.
 // Every XAML-instantiated page/control implementation header must be included here (XAML compiler requirement).
 #include "MainWindow.xaml.h"
+#include "AboutProbe.xaml.h"

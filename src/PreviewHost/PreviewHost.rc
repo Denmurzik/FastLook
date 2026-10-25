@@ -1,6 +1,8 @@
 #include <winres.h>
 #include "Common/Version.h"
 
+1 ICON "../../assets/FastLook.ico"
+
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION FASTLOOK_VERSION_RC
  PRODUCTVERSION FASTLOOK_VERSION_RC
