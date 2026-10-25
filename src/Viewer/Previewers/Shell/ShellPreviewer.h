@@ -15,9 +15,10 @@ namespace fastlook::viewer
     // ("site") of the Viewer window, positioned over a transparent XAML placeholder that follows the layout.
     //
     // A handler window parented under the site shares the Viewer's input queue, so the UI thread never sends to it
-    // synchronously while it may hang: the site is moved with SWP_ASYNCWINDOWPOS, the host is asked to quit and then
-    // terminated (our own PreviewHost only, never a foreign LocalServer32 process) before the site is destroyed, and a site
-    // that still has a foreign child is hidden and parked until that child is gone or responsive.
+    // synchronously while it may hang: the host is asked to quit and then terminated on a worker thread (our own PreviewHost
+    // only, never a foreign LocalServer32 process) before the site is destroyed on the UI thread; a site that still has a
+    // foreign child stays hidden and parked until a background probe shows that child answering. A watchdog probes the
+    // handler window while it is shown and terminates our host when it stops answering.
     class ShellPreviewer final : public IPreviewer
     {
     public:
@@ -30,6 +31,8 @@ namespace fastlook::viewer
         void CreateSite();
         void UpdateBounds();
         void FocusRoot();
+        void StartWatchdog();
+        void OnHung(); // UI thread: the handler window stopped answering
 
         std::shared_ptr<PreviewContext const> m_ctx;
         std::shared_ptr<HostProcess> m_host;

@@ -27,11 +27,14 @@ namespace
     constexpr wchar_t kControlClass[] = L"FastLookPreviewHostControl";
 
     std::mutex g_writeMutex;
+    HANDLE g_out = nullptr; // private copy of stdout: the protocol channel
+    HANDLE g_in = nullptr;  // private copy of stdin
+    constexpr size_t kMaxLine = 4096;
 
     void WriteReply(proto::HostReply const& reply)
     {
         std::string const line = proto::FormatHostReply(reply);
-        HANDLE const out = GetStdHandle(STD_OUTPUT_HANDLE);
+        HANDLE const out = g_out;
         if (out == nullptr || out == INVALID_HANDLE_VALUE)
         {
             return;
@@ -61,7 +64,7 @@ namespace
     // Reads command lines from stdin and posts them to the control window; EOF (the Viewer is gone) posts quit.
     void StdinReader(HWND control)
     {
-        HANDLE const in = GetStdHandle(STD_INPUT_HANDLE);
+        HANDLE const in = g_in;
         std::string pending;
         char buffer[512];
         bool open = in != nullptr && in != INVALID_HANDLE_VALUE;
@@ -73,6 +76,10 @@ namespace
                 break;
             }
             pending.append(buffer, read);
+            if (pending.size() > kMaxLine && pending.find('\n') == std::string::npos)
+            {
+                pending.clear();
+            }
             size_t newline;
             while ((newline = pending.find('\n')) != std::string::npos)
             {
@@ -156,6 +163,30 @@ namespace
         }
     }
 
+    // Keeps the pipes private to the protocol: a handler that prints to stdout or starts an inheriting child process cannot touch
+    // them, because the standard handles become NUL and the inheritable originals are closed.
+    void IsolateStdHandles()
+    {
+        auto const privateCopy = [](DWORD which) -> HANDLE {
+            HANDLE original = GetStdHandle(which);
+            if (original == nullptr || original == INVALID_HANDLE_VALUE)
+            {
+                return nullptr;
+            }
+            HANDLE copy = nullptr;
+            if (!DuplicateHandle(GetCurrentProcess(), original, GetCurrentProcess(), &copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+            {
+                return nullptr;
+            }
+            HANDLE nul = CreateFileW(L"NUL", GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+            SetStdHandle(which, nul == INVALID_HANDLE_VALUE ? nullptr : nul);
+            CloseHandle(original);
+            return copy;
+        };
+        g_in = privateCopy(STD_INPUT_HANDLE);
+        g_out = privateCopy(STD_OUTPUT_HANDLE);
+    }
+
     std::optional<proto::HostArgs> ReadArgs()
     {
         int count = 0;
@@ -174,6 +205,7 @@ namespace
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
 {
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
+    IsolateStdHandles();
     fastlook::core::log::Init(fastlook::core::CurrentAppPaths().logsDir, L"host", LogLevel::Info);
 
     auto const args = ReadArgs();

@@ -1,7 +1,9 @@
 #include "pch.h"
 #include "Previewers/Shell/ShellPreviewer.h"
 
+#include <atomic>
 #include <cmath>
+#include <thread>
 
 #include "Diagnostics/Log.h"
 #include "Ipc/HostProtocol.h"
@@ -25,6 +27,8 @@ namespace fastlook::viewer
         constexpr auto kReadyTimeout = std::chrono::milliseconds(8000);
         constexpr DWORD kQuitWaitMs = 300;
         constexpr DWORD kKillWaitMs = 500;
+        constexpr UINT kWatchdogProbeMs = 200;
+        constexpr int kWatchdogFailures = 2;
         constexpr int kTitleBarDip = 48;
         constexpr auto kParkInterval = std::chrono::seconds(1);
 
@@ -50,11 +54,30 @@ namespace fastlook::viewer
             (void)registered;
         }
 
-        // Sites that still had a foreign child when their previewer unloaded. They are hidden, and destroyed once the child is
-        // gone or its thread answers messages again (DestroyWindow sends to the child).
+        // True when `window`'s thread answers a message within `ms`. Background threads only: this is a blocking send.
+        bool ProbeResponsive(HWND window, UINT ms)
+        {
+            DWORD_PTR result = 0;
+            return SendMessageTimeoutW(window, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_BLOCK, ms, &result) != 0;
+        }
+
+        struct ProbeState
+        {
+            std::atomic<bool> inFlight{false};
+            std::atomic<ULONGLONG> okAt{0};
+        };
+
+        // Sites that still had a foreign child when their previewer unloaded. They are hidden and stay so until a fresh background
+        // probe shows the child's thread answering messages (DestroyWindow sends to the child): a hidden HWND costs nothing.
+        struct ParkedSite
+        {
+            HWND site = nullptr;
+            std::shared_ptr<ProbeState> probe = std::make_shared<ProbeState>();
+        };
+
         struct Parked
         {
-            std::vector<HWND> sites;
+            std::vector<ParkedSite> sites;
             winrt::Microsoft::UI::Dispatching::DispatcherQueueTimer timer{nullptr};
         };
 
@@ -64,21 +87,39 @@ namespace fastlook::viewer
             return *parked;
         }
 
+        constexpr ULONGLONG kProbeFreshMs = 1500;
+
         void SweepParked()
         {
             auto& parked = ParkedSites();
-            std::erase_if(parked.sites, [](HWND site) {
-                if (!IsWindow(site))
+            std::erase_if(parked.sites, [](ParkedSite& entry) {
+                if (!IsWindow(entry.site))
                 {
                     return true;
                 }
-                HWND const child = GetWindow(site, GW_CHILD);
-                if (child && IsHungAppWindow(child))
+                HWND const child = GetWindow(entry.site, GW_CHILD);
+                if (!child)
                 {
-                    return false;
+                    DestroyWindow(entry.site);
+                    return true;
                 }
-                DestroyWindow(site);
-                return true;
+                ULONGLONG const okAt = entry.probe->okAt.load();
+                if (okAt != 0 && GetTickCount64() - okAt < kProbeFreshMs)
+                {
+                    DestroyWindow(entry.site);
+                    return true;
+                }
+                if (!entry.probe->inFlight.exchange(true))
+                {
+                    std::thread([probe = entry.probe, child] {
+                        if (ProbeResponsive(child, 200))
+                        {
+                            probe->okAt = GetTickCount64();
+                        }
+                        probe->inFlight = false;
+                    }).detach();
+                }
+                return false;
             });
             if (parked.sites.empty() && parked.timer)
             {
@@ -89,7 +130,7 @@ namespace fastlook::viewer
         void Park(HWND site, winrt::Microsoft::UI::Dispatching::DispatcherQueue const& ui)
         {
             auto& parked = ParkedSites();
-            parked.sites.push_back(site);
+            parked.sites.push_back(ParkedSite{site});
             if (!parked.timer)
             {
                 parked.timer = ui.CreateTimer();
@@ -100,9 +141,27 @@ namespace fastlook::viewer
             parked.timer.Start();
         }
 
+        // Last step of an unload, on the UI thread, once our host is gone: destroy the site, or park it while a foreign
+        // process (WINWORD/EXCEL) still owns a window under it.
+        void FinishSite(HWND site, winrt::Microsoft::UI::Dispatching::DispatcherQueue const& ui)
+        {
+            if (!IsWindow(site))
+            {
+                return;
+            }
+            if (GetWindow(site, GW_CHILD))
+            {
+                Park(site, ui);
+            }
+            else
+            {
+                DestroyWindow(site);
+            }
+        }
+
         // Keyboard focus belongs to the XAML island's input site, not to the top-level window: only there do key presses reach
         // XAML (PreviewKeyDown -> Esc/Space/arrows). The handler's window takes the focus when it is created or shown.
-        void ReturnFocusToXaml(HWND top)
+        void FocusInputSite(HWND top)
         {
             HWND inputSite = nullptr;
             EnumChildWindows(
@@ -119,6 +178,32 @@ namespace fastlook::viewer
                 },
                 reinterpret_cast<LPARAM>(&inputSite));
             SetFocus(inputSite ? inputSite : top);
+        }
+
+        // SetFocus sends WM_KILLFOCUS to the window that has it; with the queues attached that is a blocking send to the handler's
+        // thread. So when the focus sits in a foreign thread, that thread is probed in the background first.
+        void ReturnFocusToXaml(HWND top, winrt::Microsoft::UI::Dispatching::DispatcherQueue const& ui,
+                               std::shared_ptr<std::atomic<bool>> const& alive)
+        {
+            HWND const focused = GetFocus();
+            if (!focused || GetWindowThreadProcessId(focused, nullptr) == GetCurrentThreadId())
+            {
+                FocusInputSite(top);
+                return;
+            }
+            std::thread([top, ui, alive, focused] {
+                if (!ProbeResponsive(focused, 200))
+                {
+                    FL_LOG_INFO(L"focus not returned: the window holding it does not answer");
+                    return;
+                }
+                ui.TryEnqueue([top, alive] {
+                    if (alive->load())
+                    {
+                        FocusInputSite(top);
+                    }
+                });
+            }).detach();
         }
 
         std::wstring FailedText()
@@ -233,7 +318,8 @@ namespace fastlook::viewer
 
         m_ready = true;
         // The handler window took the focus when it was created: give it back so Esc/Space reach the Viewer.
-        ReturnFocusToXaml(ctx->hwnd);
+        ReturnFocusToXaml(ctx->hwnd, ui, m_alive);
+        StartWatchdog();
         FL_LOG_INFO(L"shell preview ready");
     }
 
@@ -298,7 +384,7 @@ namespace fastlook::viewer
         {
             return;
         }
-        ReturnFocusToXaml(m_ctx->hwnd);
+        ReturnFocusToXaml(m_ctx->hwnd, m_ctx->ui, m_alive);
         try
         {
             if (auto root = m_placeholder.XamlRoot())
@@ -337,7 +423,7 @@ namespace fastlook::viewer
             {
                 return;
             }
-            // Never synchronous: a hung handler window under the site would block this thread.
+            // The site belongs to this thread, so SWP_ASYNCWINDOWPOS only keeps the call from sending to windows of other threads.
             SetWindowPos(m_site, HWND_TOP, rect.x, rect.y, rect.w, rect.h, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             if (m_host && (rect.w != m_lastRect.w || rect.h != m_lastRect.h))
             {
@@ -357,6 +443,73 @@ namespace fastlook::viewer
         }
     }
 
+    void ShellPreviewer::StartWatchdog()
+    {
+        std::weak_ptr<ShellPreviewer> const weak = std::static_pointer_cast<ShellPreviewer>(shared_from_this());
+        auto const alive = m_alive;
+        auto const ui = m_ctx->ui;
+        HWND const site = m_site;
+        // Probes the handler's window once a second. A handler that stops answering would stall the Viewer's attached input queue.
+        std::thread([weak, alive, ui, site] {
+            int failures = 0;
+            while (alive->load())
+            {
+                for (int slice = 0; slice < 10 && alive->load(); ++slice)
+                {
+                    Sleep(100);
+                }
+                if (!alive->load())
+                {
+                    return;
+                }
+                HWND const child = GetWindow(site, GW_CHILD);
+                if (!child)
+                {
+                    continue;
+                }
+                failures = ProbeResponsive(child, kWatchdogProbeMs) ? 0 : failures + 1;
+                if (failures >= kWatchdogFailures)
+                {
+                    ui.TryEnqueue([weak] {
+                        if (auto self = weak.lock())
+                        {
+                            self->OnHung();
+                        }
+                    });
+                    return;
+                }
+            }
+        }).detach();
+    }
+
+    void ShellPreviewer::OnHung()
+    {
+        if (m_unloaded || !m_ready)
+        {
+            return;
+        }
+        FL_LOG_INFO(L"shell handler window stopped answering: host terminated");
+        m_ready = false;
+        if (m_host)
+        {
+            m_host->DetachKeyHandler();
+            m_host->Terminate(); // our host's death destroys an in-process handler window and detaches the input queues
+        }
+        if (m_site)
+        {
+            ShowWindow(m_site, SW_HIDE); // a foreign handler window stays parked under the hidden site until Unload
+        }
+        if (m_placeholder)
+        {
+            TextBlock text;
+            text.Text(winrt::hstring{FailedText()});
+            text.HorizontalAlignment(HorizontalAlignment::Center);
+            text.VerticalAlignment(VerticalAlignment::Center);
+            m_placeholder.Children().Append(text);
+        }
+        FocusRoot();
+    }
+
     void ShellPreviewer::Unload()
     {
         if (m_unloaded)
@@ -369,31 +522,35 @@ namespace fastlook::viewer
         m_layoutRevoker.revoke();
         m_loadedRevoker.revoke();
 
-        if (m_host)
+        HWND const site = std::exchange(m_site, nullptr);
+        if (site)
         {
-            m_host->DetachKeyHandler();
-            m_host->RequestQuit();
-            if (!m_host->WaitExit(kQuitWaitMs))
-            {
-                m_host->Terminate(); // our PreviewHost only
-                m_host->WaitExit(kKillWaitMs);
-            }
-            m_host.reset();
+            ShowWindow(site, SW_HIDE);
         }
-
-        if (m_site)
+        auto const ui = m_ctx->ui;
+        if (auto host = std::move(m_host))
         {
-            HWND const site = std::exchange(m_site, nullptr);
-            if (GetWindow(site, GW_CHILD))
-            {
-                // A foreign process (WINWORD/EXCEL) still owns a window under the site: do not send to it from here.
-                ShowWindowAsync(site, SW_HIDE);
-                Park(site, m_ctx->ui);
-            }
-            else
-            {
-                DestroyWindow(site);
-            }
+            host->DetachKeyHandler();
+            host->RequestQuit();
+            // The host's own teardown needs this thread to answer sent messages (child destruction notifies the site), so
+            // nothing here waits: the exit wait and the kill happen on a worker, the site is finished back on the UI thread.
+            std::thread([host, site, ui] {
+                bool const graceful = host->WaitExit(kQuitWaitMs);
+                if (!graceful)
+                {
+                    host->Terminate(); // our PreviewHost only
+                    host->WaitExit(kKillWaitMs);
+                }
+                FL_LOG_INFO(L"shell host {}", graceful ? L"exited on quit" : L"terminated after the quit timeout");
+                if (site && !ui.TryEnqueue([site, ui] { FinishSite(site, ui); }))
+                {
+                    FL_LOG_INFO(L"shell site left to the window teardown");
+                }
+            }).detach();
+        }
+        else if (site)
+        {
+            FinishSite(site, ui);
         }
         m_placeholder = nullptr;
     }

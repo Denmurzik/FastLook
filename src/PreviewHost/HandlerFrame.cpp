@@ -8,14 +8,15 @@ namespace fastlook::host
     {
         namespace proto = core::host;
 
+        // Physical state: an out-of-process handler's keys arrive in its own thread, whose queue this thread does not share.
         uint32_t HeldModifiers()
         {
             uint32_t mods = 0;
-            if (GetKeyState(VK_CONTROL) < 0)
+            if ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0)
                 mods |= proto::kModCtrl;
-            if (GetKeyState(VK_SHIFT) < 0)
+            if ((GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0)
                 mods |= proto::kModShift;
-            if (GetKeyState(VK_MENU) < 0)
+            if ((GetAsyncKeyState(VK_MENU) & 0x8000) != 0)
                 mods |= proto::kModAlt;
             return mods;
         }

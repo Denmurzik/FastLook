@@ -14,6 +14,7 @@ namespace fastlook::viewer
     namespace
     {
         constexpr auto kPollSlice = std::chrono::milliseconds(50);
+        constexpr size_t kMaxLine = 4096;
 
         // Owned by this Viewer process for its whole life; closed by the OS when the process ends, which kills every host in it.
         HANDLE ViewerJob()
@@ -110,10 +111,15 @@ namespace fastlook::viewer
         InitializeProcThreadAttributeList(nullptr, 1, 0, &attributeBytes);
         std::unique_ptr<std::byte[]> attributeStorage(new std::byte[attributeBytes]);
         auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attributeStorage.get());
-        if (!InitializeProcThreadAttributeList(attributes, 1, 0, &attributeBytes) ||
-            !UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritList, sizeof(inheritList), nullptr, nullptr))
+        if (!InitializeProcThreadAttributeList(attributes, 1, 0, &attributeBytes))
         {
             error = ErrorText(L"attribute list");
+            return nullptr;
+        }
+        if (!UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritList, sizeof(inheritList), nullptr, nullptr))
+        {
+            error = ErrorText(L"attribute list");
+            DeleteProcThreadAttributeList(attributes);
             return nullptr;
         }
 
@@ -171,6 +177,10 @@ namespace fastlook::viewer
                     break;
                 }
                 pending.append(buffer, read);
+                if (pending.size() > kMaxLine && pending.find('\n') == std::string::npos)
+                {
+                    pending.clear(); // a line this long is not ours: drop it
+                }
                 size_t newline;
                 while ((newline = pending.find('\n')) != std::string::npos)
                 {
