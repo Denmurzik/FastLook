@@ -8,7 +8,7 @@
 #include "Diagnostics/Log.h"
 #include "Diagnostics/PerfLog.h"
 #include "Modes/Modes.h"
-#include "Previewers/PreviewerRegistry.h"
+#include "Util/PreviewErrorBridge.h"
 #include "Settings/Settings.h"
 #include "System/AppPaths.h"
 #include "Util/Language.h"
@@ -80,9 +80,13 @@ namespace winrt::FastLook::implementation
         auto const paths = core::CurrentAppPaths();
         auto const settings = core::LoadSettings(paths.settingsFile).values;
         core::log::Init(paths.logsDir, L"viewer", settings.logLevel);
-        for (auto const& unknown : args.unknown)
+        if (!args.unknown.empty())
         {
-            FL_LOG_INFO(L"Unknown argument ignored: {}", unknown);
+            FL_LOG_INFO(L"Ignored {} unknown argument(s)", args.unknown.size());
+            for (auto const& unknown : args.unknown)
+            {
+                FL_LOG_DEBUG(L"Unknown argument: {}", unknown); // may be a path: Debug only
+            }
         }
         viewer::ApplyLanguage(settings.general.language, args.lang);
 

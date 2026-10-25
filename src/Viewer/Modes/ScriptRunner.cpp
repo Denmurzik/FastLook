@@ -113,13 +113,23 @@ namespace fastlook::viewer
         winrt::fire_and_forget RunScriptAsync(std::wstring script)
         {
             auto const ui = ViewerHost::Get().Ui();
-            for (auto const& command : SplitCommands(script))
+            try
             {
-                if (uint32_t const delayMs = RunCommand(command))
+                for (auto const& command : SplitCommands(script))
                 {
-                    co_await winrt::resume_after(std::chrono::milliseconds(delayMs));
-                    co_await ResumeOn(ui);
+                    if (uint32_t const delayMs = RunCommand(command))
+                    {
+                        co_await winrt::resume_after(std::chrono::milliseconds(delayMs));
+                        if (!co_await ResumeOn(ui))
+                        {
+                            co_return;
+                        }
+                    }
                 }
+            }
+            catch (...)
+            {
+                FL_LOG_INFO(L"Script aborted by an exception");
             }
         }
     }

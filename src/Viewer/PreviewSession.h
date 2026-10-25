@@ -83,10 +83,13 @@ namespace fastlook::viewer
         void Retire(std::shared_ptr<PrepareRun> const& run);
         void Attach(std::shared_ptr<Request> const& req, std::shared_ptr<PrepareRun> const& run, winrt::Microsoft::UI::Xaml::UIElement const& view,
                     std::string_view kindName);
+        // MakeContext, or null when it threw (the caller then takes the failure ladder).
+        std::shared_ptr<PreviewContext> MakeContextSafe(Monitor const& monitor, std::optional<FallbackInfo> fallback);
         std::shared_ptr<PreviewContext> MakeContext(Monitor const& monitor, std::optional<FallbackInfo> fallback);
 
         Monitor ResolveMonitor(bool preferWindow) const;
-        void FitWindow(bool force);
+        void FitWindow(bool force); // never throws
+        void FitWindowImpl(bool force);
         void WatchFirstFrame();
 
         winrt::Microsoft::UI::Dispatching::DispatcherQueue m_ui{nullptr};

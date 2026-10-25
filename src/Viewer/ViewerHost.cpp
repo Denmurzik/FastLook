@@ -84,11 +84,16 @@ namespace fastlook::viewer
             // The command-line theme is a session override, not a user choice: keep what is on disk.
             m_doc.values.general.theme = core::LoadSettings(m_paths.settingsFile).values.general.theme;
         }
-        if (!core::SaveSettings(m_paths.settingsFile, m_doc))
+        bool const saved = core::SaveSettings(m_paths.settingsFile, m_doc);
+        if (!saved)
         {
             FL_LOG_INFO(L"Saving settings failed");
         }
         ApplySettings();
+        if (saved && m_callbacks.settingsSaved)
+        {
+            m_callbacks.settingsSaved();
+        }
     }
 
     void ViewerHost::ReloadSettings()

@@ -12,12 +12,13 @@
 #include "FileTypes/ClassifyFile.h"
 #include "FileTypes/Extensions.h"
 #include "FileTypes/FileName.h"
-#include "Hook/HookFilter.h"
 #include "PreviewWindow.xaml.h"
 #include "Previewers/Placeholder.h"
 #include "Previewers/PreviewerRegistry.h"
 #include "Ui/Placement.h"
 #include "Util/Async.h"
+#include "Util/Foreground.h"
+#include "Util/PreviewErrorBridge.h"
 #include "Util/Str.h"
 #include "ViewerHost.h"
 #include "WindowAnimator.h"
@@ -59,19 +60,6 @@ namespace fastlook::viewer
         {
             auto const kind = core::KindForExtension(core::BaseName(path));
             return kind == PreviewerKind::Text ? core::kDefaultTextSize : core::kDefaultOtherSize;
-        }
-
-        // Dummy key press tagged with our marker (ignored by the hook) so that SetForegroundWindow is honoured (decision 25).
-        void ForceForeground(HWND hwnd)
-        {
-            INPUT inputs[2]{};
-            inputs[0].type = INPUT_KEYBOARD;
-            inputs[0].ki.wVk = 0xE8;
-            inputs[0].ki.dwExtraInfo = core::hook::kInjectedMarker;
-            inputs[1] = inputs[0];
-            inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
-            SendInput(2, inputs, sizeof(INPUT));
-            SetForegroundWindow(hwnd);
         }
 
         struct Classified
@@ -122,6 +110,10 @@ namespace fastlook::viewer
         {
             if (auto error = TryDecodePreviewError(e))
             {
+                if (error->message.empty())
+                {
+                    error->message = Str(L"Common", L"PreviewFailed");
+                }
                 return FallbackInfo{std::move(error->message), std::move(error->storeProductId)};
             }
             FL_LOG_INFO(L"Prepare failed: 0x{:08X}", static_cast<uint32_t>(e.code().value));
@@ -343,125 +335,135 @@ namespace fastlook::viewer
         auto const ui = m_ui;
         bool const useShellHandlers = ViewerHost::Get().Settings().preview.useShellHandlers;
 
-        co_await winrt::resume_background();
-        Classified classified;
-        if (!req->cancelled)
+        // A fire_and_forget coroutine terminates the process on an escaping exception: nothing may leave this try block.
+        try
         {
-            classified = Classify(req->ref, useShellHandlers);
-        }
-        co_await ResumeOn(ui);
-        if (!IsCurrent(req))
-        {
-            co_return;
-        }
-
-        auto const& cls = classified.classification;
-        req->item.kind = cls.kind;
-        req->item.shellHandlerClsid = cls.shellHandlerClsid;
-        req->item.cloudPlaceholder = cls.cloudPlaceholder;
-        m_shownItem = req->item;
-
-        std::optional<FallbackInfo> fallback = classified.missing;
-        Stage stage = (fallback || cls.kind == PreviewerKind::Fallback) ? Stage::Fallback : Stage::Classified;
-        auto const monitor = ResolveMonitor(true);
-
-        std::shared_ptr<PrepareRun> good;
-        winrt::Microsoft::UI::Xaml::UIElement view{nullptr};
-        PreviewerKind shownKind = PreviewerKind::Fallback;
-
-        while (!good)
-        {
-            std::shared_ptr<IPreviewer> previewer;
-            try
+            co_await winrt::resume_background();
+            Classified classified;
+            if (!req->cancelled)
             {
-                switch (stage)
+                classified = Classify(req->ref, useShellHandlers);
+            }
+            if (!co_await ResumeOn(ui) || !IsCurrent(req))
+            {
+                co_return;
+            }
+
+            auto const& cls = classified.classification;
+            req->item.kind = cls.kind;
+            req->item.shellHandlerClsid = cls.shellHandlerClsid;
+            req->item.cloudPlaceholder = cls.cloudPlaceholder;
+            m_shownItem = req->item;
+
+            std::optional<FallbackInfo> fallback = classified.missing;
+            Stage stage = (fallback || cls.kind == PreviewerKind::Fallback) ? Stage::Fallback : Stage::Classified;
+            auto const monitor = ResolveMonitor(true);
+
+            std::shared_ptr<PrepareRun> good;
+            winrt::Microsoft::UI::Xaml::UIElement view{nullptr};
+            PreviewerKind shownKind = PreviewerKind::Fallback;
+
+            while (!good)
+            {
+                std::shared_ptr<IPreviewer> previewer;
+                try
                 {
-                case Stage::Classified:
-                    previewer = CreatePreviewer(cls.kind);
-                    shownKind = cls.kind;
-                    break;
-                case Stage::Fallback:
-                    previewer = CreatePreviewer(PreviewerKind::Fallback);
-                    shownKind = PreviewerKind::Fallback;
-                    break;
-                case Stage::Placeholder:
-                    previewer = MakePlaceholderPreviewer(L"Fallback");
-                    shownKind = PreviewerKind::Fallback;
-                    break;
+                    switch (stage)
+                    {
+                    case Stage::Classified:
+                        previewer = CreatePreviewer(cls.kind);
+                        shownKind = cls.kind;
+                        break;
+                    case Stage::Fallback:
+                        previewer = CreatePreviewer(PreviewerKind::Fallback);
+                        shownKind = PreviewerKind::Fallback;
+                        break;
+                    case Stage::Placeholder:
+                        previewer = MakePlaceholderPreviewer(L"Fallback");
+                        shownKind = PreviewerKind::Fallback;
+                        break;
+                    }
                 }
-            }
-            catch (...)
-            {
-                previewer = nullptr;
-            }
-
-            std::optional<FallbackInfo> failure;
-            if (!previewer)
-            {
-                failure = FallbackInfo{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
-            }
-            else
-            {
-                auto run = std::make_shared<PrepareRun>();
-                run->previewer = previewer;
-                req->run = run;
-                StartPrepare(run, req->item, MakeContext(monitor, fallback));
-
-                co_await WaitForPrepare{this, run};
-
-                if (!IsCurrent(req))
+                catch (...)
                 {
-                    co_return; // superseded: Retire() already took over the run
+                    previewer = nullptr;
                 }
-                if (run->timedOut)
+
+                std::optional<FallbackInfo> failure;
+                if (!previewer)
                 {
-                    Retire(run); // Unload happens once PrepareAsync really completes
-                    failure = FallbackInfo{std::wstring{Str(L"Common", L"TimedOut")}, std::nullopt};
+                    failure = FallbackInfo{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
+                }
+                else if (std::shared_ptr<PreviewContext> ctx = MakeContextSafe(monitor, fallback); !ctx)
+                {
+                    failure = FallbackInfo{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
                 }
                 else
                 {
-                    try
+                    auto run = std::make_shared<PrepareRun>();
+                    run->previewer = previewer;
+                    req->run = run;
+                    StartPrepare(run, req->item, std::move(ctx));
+
+                    co_await WaitForPrepare{this, run};
+
+                    if (!IsCurrent(req))
                     {
-                        run->action.GetResults();
-                        view = previewer->View();
-                        good = run;
+                        co_return; // superseded: Retire() already took over the run
                     }
-                    catch (winrt::hresult_error const& e)
+                    if (run->timedOut)
                     {
-                        failure = DescribeFailure(e);
+                        Retire(run); // Unload happens once PrepareAsync really completes
+                        failure = FallbackInfo{std::wstring{Str(L"Common", L"TimedOut")}, std::nullopt};
                     }
-                    catch (...)
-                    {
-                        failure = FallbackInfo{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
-                    }
-                    if (!good)
+                    else
                     {
                         try
                         {
-                            previewer->Unload();
+                            run->action.GetResults();
+                            view = previewer->View();
+                            Attach(req, run, view, KindName(shownKind)); // throws before changing anything if the view is rejected
+                            good = run;
+                        }
+                        catch (winrt::hresult_error const& e)
+                        {
+                            failure = DescribeFailure(e);
                         }
                         catch (...)
                         {
+                            failure = FallbackInfo{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
+                        }
+                        if (!good)
+                        {
+                            try
+                            {
+                                previewer->Unload();
+                            }
+                            catch (...)
+                            {
+                            }
                         }
                     }
+                    req->run = nullptr;
                 }
-                req->run = nullptr;
-            }
 
-            if (good)
-            {
-                break;
+                if (good)
+                {
+                    break;
+                }
+                if (stage == Stage::Placeholder)
+                {
+                    FL_LOG_INFO(L"No previewer could be shown");
+                    co_return;
+                }
+                fallback = std::move(failure);
+                stage = stage == Stage::Classified ? Stage::Fallback : Stage::Placeholder;
             }
-            if (stage == Stage::Placeholder)
-            {
-                FL_LOG_INFO(L"No previewer could be shown");
-                co_return;
-            }
-            fallback = std::move(failure);
-            stage = stage == Stage::Classified ? Stage::Fallback : Stage::Placeholder;
         }
-
-        Attach(req, good, view, KindName(shownKind));
+        catch (...)
+        {
+            FL_LOG_INFO(L"Preview request failed with an exception");
+        }
     }
 
     bool PreviewSession::IsCurrent(std::shared_ptr<Request> const& req) const
@@ -562,6 +564,19 @@ namespace fastlook::viewer
         }
     }
 
+    std::shared_ptr<PreviewContext> PreviewSession::MakeContextSafe(Monitor const& monitor, std::optional<FallbackInfo> fallback)
+    {
+        try
+        {
+            return MakeContext(monitor, std::move(fallback));
+        }
+        catch (...)
+        {
+            FL_LOG_INFO(L"Creating the preview context failed");
+            return nullptr;
+        }
+    }
+
     std::shared_ptr<PreviewContext> PreviewSession::MakeContext(Monitor const& monitor, std::optional<FallbackInfo> fallback)
     {
         auto& host = ViewerHost::Get();
@@ -591,8 +606,10 @@ namespace fastlook::viewer
         auto& host = ViewerHost::Get();
         auto* window = host.Window();
 
-        auto previous = std::move(m_attached);
+        // The only step allowed to throw: nothing has changed yet, so the caller can fall back cleanly.
         window->SetContent(view);
+
+        auto previous = std::move(m_attached);
         m_attached = run;
         m_current.reset();
         if (previous)
@@ -609,13 +626,20 @@ namespace fastlook::viewer
         FitWindow(false);
 
         core::perf::Mark("content_ready", std::string{"kind="}.append(kindName));
-        if (req->fromNavigation && host.Callbacks().navigated)
+        try
         {
-            host.Callbacks().navigated(m_shownItem, m_navMode, m_explorer);
+            if (req->fromNavigation && host.Callbacks().navigated)
+            {
+                host.Callbacks().navigated(m_shownItem, m_navMode, m_explorer);
+            }
+            if (host.contentReady)
+            {
+                host.contentReady();
+            }
         }
-        if (host.contentReady)
+        catch (...)
         {
-            host.contentReady();
+            FL_LOG_INFO(L"A content-ready callback threw");
         }
     }
 
@@ -652,6 +676,18 @@ namespace fastlook::viewer
     }
 
     void PreviewSession::FitWindow(bool force)
+    {
+        try
+        {
+            FitWindowImpl(force);
+        }
+        catch (...)
+        {
+            FL_LOG_INFO(L"Fitting the window failed");
+        }
+    }
+
+    void PreviewSession::FitWindowImpl(bool force)
     {
         if (!m_visible || !m_attached)
         {
@@ -713,63 +749,72 @@ namespace fastlook::viewer
     winrt::fire_and_forget PreviewSession::HideAsync(uint64_t serial)
     {
         auto self = shared_from_this();
-        auto& host = ViewerHost::Get();
-        auto const window = host.CurrentWindow();
-        auto const iconRect = m_iconRect;
-        HWND const explorer = m_explorer;
-        HWND const hwnd = host.Window()->Hwnd();
-
+        // A fire_and_forget coroutine terminates the process on an escaping exception: nothing may leave this try block.
         try
         {
-            co_await anim::Out(window, iconRect);
-        }
-        catch (...)
-        {
-        }
-        if (serial != m_hideSerial)
-        {
-            co_return; // shown again while the window was animating out
-        }
+            auto& host = ViewerHost::Get();
+            auto const window = host.CurrentWindow();
+            auto const iconRect = m_iconRect;
+            HWND const explorer = m_explorer;
+            HWND const hwnd = host.Window()->Hwnd();
 
-        window.AppWindow().Hide();
-        window.AppWindow().IsShownInSwitchers(false);
-        if (m_renderToken)
-        {
-            winrt::Microsoft::UI::Xaml::Media::CompositionTarget::Rendering(m_renderToken);
-            m_renderToken = {};
-        }
-
-        // Unload only once the view is out of the window; an attached previewer's PrepareAsync has completed by definition.
-        host.Window()->ClearContent();
-        if (auto attached = std::exchange(m_attached, nullptr))
-        {
             try
             {
-                attached->previewer->Unload();
+                co_await anim::Out(window, iconRect);
             }
             catch (...)
             {
             }
-        }
-        core::perf::Mark("hidden");
-
-        // Give the foreground back to the Explorer window the preview was opened from (decision 25).
-        if (explorer != nullptr && IsWindow(explorer))
-        {
-            HWND const foreground = GetForegroundWindow();
-            if (foreground == nullptr || foreground == hwnd)
+            if (serial != m_hideSerial)
             {
-                SetForegroundWindow(explorer);
+                co_return; // shown again while the window was animating out
+            }
+
+            // Give the foreground back to the Explorer window the preview was opened from while our window still holds it:
+            // after Hide() Windows would pick some other window (decision 25).
+            if (explorer != nullptr && IsWindow(explorer))
+            {
+                HWND const foreground = GetForegroundWindow();
+                if (foreground == nullptr || foreground == hwnd)
+                {
+                    SetForegroundWindow(explorer);
+                }
+            }
+
+            window.AppWindow().Hide();
+            window.AppWindow().IsShownInSwitchers(false);
+            if (m_renderToken)
+            {
+                winrt::Microsoft::UI::Xaml::Media::CompositionTarget::Rendering(m_renderToken);
+                m_renderToken = {};
+            }
+
+            // Unload only once the view is out of the window; an attached previewer's PrepareAsync has completed by definition.
+            host.Window()->ClearContent();
+            if (auto attached = std::exchange(m_attached, nullptr))
+            {
+                try
+                {
+                    attached->previewer->Unload();
+                }
+                catch (...)
+                {
+                }
+            }
+            core::perf::Mark("hidden");
+
+            if (host.Callbacks().previewHidden)
+            {
+                host.Callbacks().previewHidden();
+            }
+            if (host.Behavior() == CloseBehavior::ExitProcess)
+            {
+                host.ExitApp();
             }
         }
-
-        if (host.Callbacks().previewHidden)
+        catch (...)
         {
-            host.Callbacks().previewHidden();
-        }
-        if (host.Behavior() == CloseBehavior::ExitProcess)
-        {
-            host.ExitApp();
+            FL_LOG_INFO(L"Hiding the preview failed with an exception");
         }
     }
 }
