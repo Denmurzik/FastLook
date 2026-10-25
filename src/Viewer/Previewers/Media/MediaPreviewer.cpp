@@ -1,12 +1,380 @@
 #include "pch.h"
+#include "Previewers/Media/MediaPreviewer.h"
+
+#include <algorithm>
+#include <atomic>
+#include <cmath>
+#include <cwctype>
+#include <format>
+
+#include <winrt/Windows.UI.Text.h>
+
+#include "Diagnostics/Log.h"
+#include "FileTypes/StoreLinks.h"
+#include "Previewers/Common/ShellInfo.h"
 #include "Previewers/Factories.h"
-#include "Previewers/Placeholder.h"
+#include "Util/Async.h"
+#include "Util/Str.h"
+#include "ViewerHost.h"
 
 namespace fastlook::viewer
 {
-    // Stub: replaced by the real previewer in a later task.
+    namespace
+    {
+        using namespace winrt::Microsoft::UI::Xaml;
+        using winrt::Windows::Media::Playback::MediaPlayer;
+
+        constexpr auto kOpenTimeout = std::chrono::seconds(3);
+        constexpr auto kVolumeSaveDelay = std::chrono::milliseconds(500);
+        constexpr double kCoverDip = 160;
+        constexpr int kCoverRequestPx = 256;
+
+        bool IsAudioExtension(std::filesystem::path const& path)
+        {
+            auto ext = path.extension().wstring();
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+            for (auto const* known : {L".mp3", L".wav", L".flac", L".m4a", L".aac", L".ogg", L".oga", L".opus", L".wma", L".mka", L".aiff", L".aif", L".amr"})
+            {
+                if (ext == known)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Shared with the MediaPlayer's event handlers, which outlive the coroutine frame when it is cancelled.
+        struct OpenState
+        {
+            winrt::handle signal{::CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+            std::atomic<bool> failed{false};
+            void Set() const { ::SetEvent(signal.get()); }
+        };
+
+        // Closes the player on every exit from PrepareAsync that did not hand it over to the previewer.
+        struct PlayerGuard
+        {
+            MediaPlayer player{nullptr};
+            winrt::Windows::Media::Core::MediaSource source{nullptr};
+            ~PlayerGuard()
+            {
+                try
+                {
+                    if (player)
+                    {
+                        player.Pause();
+                        player.Source(nullptr);
+                        player.Close();
+                    }
+                    if (source)
+                    {
+                        source.Close();
+                    }
+                }
+                catch (...)
+                {
+                }
+            }
+        };
+
+        std::wstring FormatDuration(std::chrono::milliseconds duration)
+        {
+            auto const total = static_cast<long long>(duration.count() / 1000);
+            auto const h = total / 3600, m = (total / 60) % 60, s = total % 60;
+            return h > 0 ? std::format(L"{}:{:02}:{:02}", h, m, s) : std::format(L"{}:{:02}", m, s);
+        }
+
+        Controls::TextBlock MakeText(std::wstring const& text, double size, bool bold, double opacity)
+        {
+            Controls::TextBlock block;
+            block.Text(winrt::hstring{text});
+            block.FontSize(size);
+            block.Opacity(opacity);
+            block.TextWrapping(TextWrapping::Wrap);
+            if (bold)
+            {
+                block.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
+            }
+            return block;
+        }
+    }
+
+    winrt::Windows::Foundation::IAsyncAction MediaPreviewer::PrepareAsync(PreviewItem item, std::shared_ptr<PreviewContext const> ctx)
+    {
+        auto self = shared_from_this();
+        auto cancel = co_await winrt::get_cancellation_token();
+        m_ctx = ctx;
+        auto const ui = ctx->ui;
+        std::filesystem::path const path{item.ref.path};
+        m_fileName = path.filename().wstring();
+        bool const audioByName = IsAudioExtension(path);
+
+        auto state = std::make_shared<OpenState>();
+        cancel.callback([state] { state->Set(); });
+
+        PlayerGuard guard;
+        bool fileOpened = false;
+        try
+        {
+            auto const file = co_await winrt::Windows::Storage::StorageFile::GetFileFromPathAsync(winrt::hstring{path.wstring()});
+            fileOpened = true;
+            if (cancel())
+            {
+                co_return;
+            }
+            guard.source = winrt::Windows::Media::Core::MediaSource::CreateFromStorageFile(file);
+        }
+        catch (winrt::hresult_error const&)
+        {
+            if (cancel())
+            {
+                co_return;
+            }
+            fileOpened = false;
+        }
+        if (!fileOpened)
+        {
+            throw PreviewError{std::wstring{Str(L"Media", L"Unsupported")}, std::nullopt};
+        }
+
+        guard.player = MediaPlayer{};
+        guard.player.AutoPlay(false);
+        guard.player.MediaOpened([state](auto const&, auto const&) { state->Set(); });
+        guard.player.MediaFailed([state](auto const&, auto const&) {
+            state->failed = true;
+            state->Set();
+        });
+        guard.player.Source(guard.source);
+
+        bool const signalled = co_await winrt::resume_on_signal(state->signal.get(), kOpenTimeout);
+        if (cancel())
+        {
+            co_return;
+        }
+        if (!signalled)
+        {
+            throw PreviewError{std::wstring{Str(L"Common", L"TimedOut")}, std::nullopt};
+        }
+        if (state->failed)
+        {
+            std::optional<std::wstring> product;
+            if (!audioByName)
+            {
+                product = std::wstring{core::StoreProductId(core::MissingCodec::Hevc)};
+            }
+            throw PreviewError{std::wstring{Str(L"Media", L"Unsupported")}, product};
+        }
+
+        auto const session = guard.player.PlaybackSession();
+        auto const width = session.NaturalVideoWidth();
+        auto const height = session.NaturalVideoHeight();
+        bool const video = width > 0 && height > 0;
+        AudioInfo audio;
+        if (!video)
+        {
+            audio = ReadAudioInfo(path); // background thread
+        }
+
+        if (!co_await ResumeOn(ui) || cancel())
+        {
+            co_return;
+        }
+        winrt::Microsoft::UI::Xaml::Media::ImageSource cover{nullptr};
+        if (!video)
+        {
+            cover = co_await LoadThumbnailAsync(item.ref, kCoverRequestPx, false);
+            if (cancel() || !co_await ResumeOn(ui))
+            {
+                co_return;
+            }
+        }
+
+        m_video = video;
+        m_audio = std::move(audio);
+        m_cover = cover;
+        m_preferred = video ? winrt::Windows::Foundation::Size{static_cast<float>(width / ctx->scale), static_cast<float>(height / ctx->scale)}
+                            : winrt::Windows::Foundation::Size{720, 360};
+        m_player = std::move(guard.player);
+        m_source = std::move(guard.source);
+        guard.player = nullptr;
+        guard.source = nullptr;
+    }
+
+    winrt::Microsoft::UI::Xaml::UIElement MediaPreviewer::View()
+    {
+        m_unloaded = false;
+        auto const& media = m_ctx->settings.preview;
+        m_savedVolume = std::clamp(media.mediaVolume, 0.0, 1.0);
+        m_pendingVolume = m_savedVolume;
+        m_player.Volume(m_savedVolume);
+
+        std::weak_ptr<IPreviewer> weak = shared_from_this();
+        auto const ui = m_ctx->ui;
+        m_volumeToken = m_player.VolumeChanged([weak, ui](MediaPlayer const& player, auto const&) {
+            double const volume = player.Volume();
+            ui.TryEnqueue([weak, volume] {
+                if (auto const strong = weak.lock())
+                {
+                    static_cast<MediaPreviewer&>(*strong).OnVolumeChanged(volume);
+                }
+            });
+        });
+
+        m_element = Controls::MediaPlayerElement{};
+        m_element.AreTransportControlsEnabled(true);
+        m_element.Stretch(winrt::Microsoft::UI::Xaml::Media::Stretch::Uniform);
+        m_element.SetMediaPlayer(m_player);
+
+        UIElement root = m_element;
+        if (!m_video)
+        {
+            Controls::Image image;
+            image.Source(m_cover);
+            image.Stretch(winrt::Microsoft::UI::Xaml::Media::Stretch::Uniform);
+            Controls::Border coverFrame;
+            coverFrame.Width(kCoverDip);
+            coverFrame.Height(kCoverDip);
+            coverFrame.CornerRadius({8, 8, 8, 8});
+            coverFrame.Child(image);
+
+            std::wstring const title = m_audio.title.empty() ? m_fileName : m_audio.title;
+            Controls::StackPanel text;
+            text.Spacing(6);
+            text.VerticalAlignment(VerticalAlignment::Center);
+            text.Children().Append(MakeText(title, 22, true, 1.0));
+            if (!m_audio.artist.empty())
+            {
+                text.Children().Append(MakeText(m_audio.artist, 15, false, 0.85));
+            }
+            if (!m_audio.album.empty())
+            {
+                text.Children().Append(MakeText(m_audio.album, 14, false, 0.65));
+            }
+            if (m_audio.duration.count() > 0)
+            {
+                text.Children().Append(MakeText(FormatDuration(m_audio.duration), 14, false, 0.65));
+            }
+
+            Controls::Grid header;
+            header.ColumnSpacing(24);
+            header.VerticalAlignment(VerticalAlignment::Center);
+            Controls::ColumnDefinition coverColumn, textColumn;
+            coverColumn.Width(GridLengthHelper::Auto());
+            textColumn.Width(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            header.ColumnDefinitions().Append(coverColumn);
+            header.ColumnDefinitions().Append(textColumn);
+            Controls::Grid::SetColumn(coverFrame, 0);
+            Controls::Grid::SetColumn(text, 1);
+            header.Children().Append(coverFrame);
+            header.Children().Append(text);
+
+            m_element.VerticalAlignment(VerticalAlignment::Bottom);
+            Controls::Grid grid;
+            grid.Padding({24, 24, 24, 8});
+            Controls::RowDefinition headerRow, barRow;
+            headerRow.Height(GridLengthHelper::FromValueAndType(1, GridUnitType::Star));
+            barRow.Height(GridLengthHelper::Auto());
+            grid.RowDefinitions().Append(headerRow);
+            grid.RowDefinitions().Append(barRow);
+            Controls::Grid::SetRow(header, 0);
+            Controls::Grid::SetRow(m_element, 1);
+            grid.Children().Append(header);
+            grid.Children().Append(m_element);
+            root = grid;
+        }
+
+        if (media.autoplayMedia)
+        {
+            m_player.Play();
+        }
+        return root;
+    }
+
+    void MediaPreviewer::OnVolumeChanged(double volume)
+    {
+        if (m_unloaded || std::abs(volume - m_savedVolume) < 0.005)
+        {
+            return;
+        }
+        m_pendingVolume = volume;
+        if (!m_volumeTimer)
+        {
+            m_volumeTimer = m_ctx->ui.CreateTimer();
+            m_volumeTimer.IsRepeating(false);
+            m_volumeTimer.Interval(kVolumeSaveDelay);
+            std::weak_ptr<IPreviewer> weak = shared_from_this();
+            m_volumeTimer.Tick([weak](auto const&, auto const&) {
+                if (auto const strong = weak.lock())
+                {
+                    static_cast<MediaPreviewer&>(*strong).FlushVolume();
+                }
+            });
+        }
+        m_volumeTimer.Stop();
+        m_volumeTimer.Start();
+    }
+
+    void MediaPreviewer::FlushVolume()
+    {
+        if (m_volumeTimer)
+        {
+            m_volumeTimer.Stop();
+        }
+        if (std::abs(m_pendingVolume - m_savedVolume) < 0.005)
+        {
+            return;
+        }
+        auto settings = ViewerHost::Get().Settings();
+        settings.preview.mediaVolume = m_pendingVolume;
+        if (ViewerHost::Get().SaveSettings(settings))
+        {
+            m_savedVolume = m_pendingVolume;
+        }
+    }
+
+    void MediaPreviewer::CloseMedia()
+    {
+        try
+        {
+            if (m_player)
+            {
+                m_player.VolumeChanged(m_volumeToken);
+                m_player.Pause();
+                m_player.Source(nullptr);
+                m_player.Close();
+            }
+            if (m_source)
+            {
+                m_source.Close();
+            }
+            if (m_element)
+            {
+                m_element.SetMediaPlayer(nullptr);
+            }
+        }
+        catch (winrt::hresult_error const&)
+        {
+            FL_LOG_INFO(L"Closing the media player failed");
+        }
+        m_player = nullptr;
+        m_source = nullptr;
+        m_element = nullptr;
+    }
+
+    void MediaPreviewer::Unload()
+    {
+        if (!m_unloaded && m_volumeTimer)
+        {
+            FlushVolume();
+        }
+        m_unloaded = true;
+        m_volumeTimer = nullptr;
+        CloseMedia();
+        m_cover = nullptr;
+    }
+
     std::shared_ptr<IPreviewer> CreateMediaPreviewer()
     {
-        return MakePlaceholderPreviewer(L"Media");
+        return std::make_shared<MediaPreviewer>();
     }
 }
