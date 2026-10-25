@@ -2,6 +2,8 @@
 # Win32 helpers shared by the UI-verification and measurement scripts.
 # Frozen after Task 2 except for Tasks 31 and 33.
 
+# Add-Type is not idempotent; skip when the type exists so repeated Import-Module -Force works.
+if (-not ('FastLookWin32' -as [type])) {
 Add-Type -AssemblyName System.Drawing.Common
 # Reference every managed runtime assembly (System.Drawing.Common forwards into several private ones).
 $fastLookRefs = Get-ChildItem $PSHOME -Filter *.dll | Where-Object {
@@ -187,6 +189,7 @@ public static class FastLookWin32
     }
 }
 '@
+}
 
 [void][FastLookWin32]::MakeDpiAware()
 

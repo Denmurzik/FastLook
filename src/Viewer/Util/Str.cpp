@@ -14,7 +14,9 @@ namespace fastlook::viewer
         using winrt::Microsoft::Windows::ApplicationModel::Resources::ResourceLoader;
 
         std::mutex g_mutex;
-        std::map<std::wstring, ResourceLoader, std::less<>> g_loaders;
+        // Intentionally leaked: ResourceLoader holds WinRT objects that must not be destroyed by CRT static
+        // destruction, which runs after WinRT/Windows App SDK teardown.
+        auto& g_loaders = *new std::map<std::wstring, ResourceLoader, std::less<>>;
         std::set<std::wstring, std::less<>> g_reportedMissing;
 
         ResourceLoader LoaderFor(std::wstring_view map)
