@@ -1,3 +1,5 @@
+#include <Windows.h>
+
 #include <nlohmann/json.hpp>
 
 #include "Settings/Settings.h"
@@ -126,4 +128,22 @@ TEST(Settings, SaveThenLoadRoundTrips)
     EXPECT_FALSE(loaded.recoveredFromCorrupt);
     EXPECT_EQ(nlohmann::json::parse(SerializeSettings(loaded))["extra"][1], 2);
     EXPECT_FALSE(std::filesystem::exists(dir / "settings.json.tmp"));
+}
+
+TEST(Settings, UnreadableFileIsNotOverwritten)
+{
+    auto f = MakeTempDir() / "settings.json";
+    WriteFile(f, R"({"general":{"theme":"dark"}})");
+    HANDLE lock = CreateFileW(f.c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    ASSERT_NE(lock, INVALID_HANDLE_VALUE);
+
+    auto d = LoadSettings(f);
+    EXPECT_TRUE(d.readFailed);
+    EXPECT_FALSE(d.recoveredFromCorrupt);
+    EXPECT_EQ(d.values, Settings{});
+    EXPECT_FALSE(SaveSettings(f, d));
+    CloseHandle(lock);
+
+    EXPECT_EQ(ReadFile(f), R"({"general":{"theme":"dark"}})");
+    EXPECT_FALSE(std::filesystem::exists(f.string() + ".tmp"));
 }

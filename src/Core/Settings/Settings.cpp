@@ -214,7 +214,14 @@ namespace fastlook::core
     {
         std::ifstream in(file, std::ios::binary);
         if (!in)
-            return {};
+        {
+            SettingsDocument unreadable;
+            std::error_code existsEc;
+            unreadable.readFailed = std::filesystem::exists(file, existsEc);
+            if (unreadable.readFailed)
+                FL_LOG_INFO(L"settings file exists but cannot be read: {}", log::RedactPath(file));
+            return unreadable;
+        }
         std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         in.close();
 
@@ -225,12 +232,16 @@ namespace fastlook::core
             bak += L".bak";
             std::error_code ec;
             std::filesystem::copy_file(file, bak, std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec)
+                FL_LOG_INFO(L"warning: cannot back up corrupt settings file ({}): {}", ec.value(), log::RedactPath(bak));
         }
         return doc;
     }
 
     bool SaveSettings(std::filesystem::path const& file, SettingsDocument const& doc)
     {
+        if (doc.readFailed)
+            return false;
         std::error_code ec;
         if (file.has_parent_path())
             std::filesystem::create_directories(file.parent_path(), ec);

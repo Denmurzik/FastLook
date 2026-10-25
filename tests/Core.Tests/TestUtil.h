@@ -7,13 +7,36 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <mutex>
 #include <random>
 #include <span>
+#include <system_error>
 #include <string>
 #include <string_view>
 #include <vector>
 
 #include "Text/Utf.h"
+
+// Removes every directory handed out by MakeTempDir when the test process exits.
+struct TempDirCleanup
+{
+    std::mutex mutex;
+    std::vector<std::filesystem::path> dirs;
+    ~TempDirCleanup()
+    {
+        for (auto const& dir : dirs)
+        {
+            std::error_code ec;
+            std::filesystem::remove_all(dir, ec);
+        }
+    }
+};
+
+inline TempDirCleanup& TempDirs()
+{
+    static TempDirCleanup cleanup;
+    return cleanup;
+}
 
 inline std::filesystem::path MakeTempDir()
 {
@@ -22,6 +45,11 @@ inline std::filesystem::path MakeTempDir()
     auto dir = std::filesystem::temp_directory_path() /
                (L"FastLookTests-" + std::to_wstring(rd()) + L"-" + std::to_wstring(counter++));
     std::filesystem::create_directories(dir);
+    {
+        auto& cleanup = TempDirs();
+        std::lock_guard lock(cleanup.mutex);
+        cleanup.dirs.push_back(dir);
+    }
     return dir;
 }
 
