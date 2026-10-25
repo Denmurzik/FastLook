@@ -18,4 +18,34 @@
   <data name="Close" xml:space="preserve">
     <value>Закрыть</value>
   </data>
+  <data name="Counter" xml:space="preserve">
+    <value>{0} / {1}</value>
+  </data>
+  <data name="Fullscreen" xml:space="preserve">
+    <value>Во весь экран</value>
+  </data>
+  <data name="Loading" xml:space="preserve">
+    <value>Загрузка…</value>
+  </data>
+  <data name="NotFound" xml:space="preserve">
+    <value>Файл не найден</value>
+  </data>
+  <data name="Open" xml:space="preserve">
+    <value>Открыть</value>
+  </data>
+  <data name="OpenWith" xml:space="preserve">
+    <value>Открыть с помощью…</value>
+  </data>
+  <data name="Pin" xml:space="preserve">
+    <value>Закрепить</value>
+  </data>
+  <data name="PreviewFailed" xml:space="preserve">
+    <value>Не удалось показать файл</value>
+  </data>
+  <data name="ShowInFolder" xml:space="preserve">
+    <value>Показать в папке</value>
+  </data>
+  <data name="TimedOut" xml:space="preserve">
+    <value>Превью не успело загрузиться</value>
+  </data>
 </root>

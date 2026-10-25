@@ -1,9 +1,0 @@
-namespace FastLook
-{
-    // Temporary probe proving the Page/Midl/PRIResource globs; removed in Task 9.
-    [default_interface]
-    runtimeclass AboutProbe : Microsoft.UI.Xaml.Controls.UserControl
-    {
-        AboutProbe();
-    }
-}

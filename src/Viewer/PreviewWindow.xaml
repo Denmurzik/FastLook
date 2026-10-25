@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="FastLook.PreviewWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Window.SystemBackdrop>
+        <MicaBackdrop />
+    </Window.SystemBackdrop>
+
+    <Grid x:Name="RootGrid">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <!-- Filled by the chrome task. Transparent so the empty bar still drags the window. -->
+        <Grid x:Name="TitleBarHost" Grid.Row="0" Background="Transparent" />
+
+        <Grid x:Name="ContentHost" Grid.Row="1">
+            <TextBlock x:Name="LoadingText"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"
+                       Style="{StaticResource BodyTextBlockStyle}"
+                       Visibility="Collapsed" />
+        </Grid>
+    </Grid>
+</Window>

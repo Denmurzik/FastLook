@@ -1,0 +1,775 @@
+#include "pch.h"
+#include "PreviewSession.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdlib>
+#include <string>
+#include <shellscalingapi.h>
+
+#include "Diagnostics/Log.h"
+#include "Diagnostics/PerfLog.h"
+#include "FileTypes/ClassifyFile.h"
+#include "FileTypes/Extensions.h"
+#include "FileTypes/FileName.h"
+#include "Hook/HookFilter.h"
+#include "PreviewWindow.xaml.h"
+#include "Previewers/Placeholder.h"
+#include "Previewers/PreviewerRegistry.h"
+#include "Ui/Placement.h"
+#include "Util/Async.h"
+#include "Util/Str.h"
+#include "ViewerHost.h"
+#include "WindowAnimator.h"
+
+#pragma comment(lib, "shcore.lib")
+
+namespace fastlook::viewer
+{
+    namespace
+    {
+        using core::PreviewerKind;
+        using winrt::Windows::Foundation::TimeSpan;
+
+        constexpr TimeSpan kPrepareTimeout = std::chrono::seconds(10);
+
+        std::string_view KindName(PreviewerKind kind)
+        {
+            switch (kind)
+            {
+            case PreviewerKind::Image: return "image";
+            case PreviewerKind::Text: return "text";
+            case PreviewerKind::Markdown: return "markdown";
+            case PreviewerKind::Media: return "media";
+            case PreviewerKind::Pdf: return "pdf";
+            case PreviewerKind::Archive: return "archive";
+            case PreviewerKind::Folder: return "folder";
+            case PreviewerKind::Shell: return "shell";
+            case PreviewerKind::Fallback: return "fallback";
+            }
+            return "fallback";
+        }
+
+        bool SamePath(std::wstring_view a, std::wstring_view b)
+        {
+            return CompareStringOrdinal(a.data(), static_cast<int>(a.size()), b.data(), static_cast<int>(b.size()), TRUE) == CSTR_EQUAL;
+        }
+
+        core::SizeD DefaultSizeFor(std::wstring_view path)
+        {
+            auto const kind = core::KindForExtension(core::BaseName(path));
+            return kind == PreviewerKind::Text ? core::kDefaultTextSize : core::kDefaultOtherSize;
+        }
+
+        // Dummy key press tagged with our marker (ignored by the hook) so that SetForegroundWindow is honoured (decision 25).
+        void ForceForeground(HWND hwnd)
+        {
+            INPUT inputs[2]{};
+            inputs[0].type = INPUT_KEYBOARD;
+            inputs[0].ki.wVk = 0xE8;
+            inputs[0].ki.dwExtraInfo = core::hook::kInjectedMarker;
+            inputs[1] = inputs[0];
+            inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(2, inputs, sizeof(INPUT));
+            SetForegroundWindow(hwnd);
+        }
+
+        struct Classified
+        {
+            core::FileClassification classification;
+            std::optional<FallbackInfo> missing;
+        };
+
+        struct ComScope
+        {
+            bool initialised;
+            ComScope() : initialised(SUCCEEDED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {}
+            ~ComScope()
+            {
+                if (initialised)
+                {
+                    CoUninitialize();
+                }
+            }
+        };
+
+        // Background thread.
+        Classified Classify(core::ipc::Item const& ref, bool useShellHandlers)
+        {
+            Classified result;
+            if (!ref.isVirtual && GetFileAttributesW(ref.path.c_str()) == INVALID_FILE_ATTRIBUTES)
+            {
+                DWORD const error = GetLastError();
+                if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)
+                {
+                    result.missing = FallbackInfo{std::wstring{Str(L"Common", L"NotFound")}, std::nullopt};
+                    return result;
+                }
+            }
+            try
+            {
+                ComScope com;
+                result.classification = core::ClassifyFile(ref.path, ref.isVirtual, useShellHandlers);
+            }
+            catch (...)
+            {
+                result.classification = {};
+            }
+            return result;
+        }
+
+        FallbackInfo DescribeFailure(winrt::hresult_error const& e)
+        {
+            if (auto error = TryDecodePreviewError(e))
+            {
+                return FallbackInfo{std::move(error->message), std::move(error->storeProductId)};
+            }
+            FL_LOG_INFO(L"Prepare failed: 0x{:08X}", static_cast<uint32_t>(e.code().value));
+            if (e.code() == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) || e.code() == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND))
+            {
+                return FallbackInfo{std::wstring{Str(L"Common", L"NotFound")}, std::nullopt};
+            }
+            return FallbackInfo{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
+        }
+
+        // An already failed IAsyncAction for a PrepareAsync that threw before returning one.
+        winrt::Windows::Foundation::IAsyncAction Rethrow(std::exception_ptr error)
+        {
+            if (error)
+            {
+                std::rethrow_exception(error);
+            }
+            co_return;
+        }
+
+        enum class Stage
+        {
+            Classified, // the previewer chosen by classification
+            Fallback,
+            Placeholder // last resort, cannot fail in practice
+        };
+    }
+
+    // Awaitable: suspends until the run completes or the timeout expires (run->timedOut tells which).
+    struct PreviewSession::WaitForPrepare
+    {
+        PreviewSession* session;
+        std::shared_ptr<PrepareRun> run;
+
+        bool await_ready() const noexcept { return run->completed; }
+
+        void await_suspend(std::coroutine_handle<> handle) const
+        {
+            run->waiter = handle;
+            auto timer = session->m_ui.CreateTimer();
+            timer.Interval(kPrepareTimeout);
+            timer.IsRepeating(false);
+            timer.Tick([weakRun = std::weak_ptr<PrepareRun>{run}, ui = session->m_ui](auto const& sender, auto const&) {
+                sender.Stop();
+                // Resume outside the timer's own callback: the continuation drops the run, and with it this timer.
+                ui.TryEnqueue([weakRun] {
+                    auto run = weakRun.lock();
+                    if (run && !run->completed && run->waiter)
+                    {
+                        run->timedOut = true;
+                        std::exchange(run->waiter, {}).resume();
+                    }
+                });
+            });
+            run->timer = timer;
+            timer.Start();
+        }
+
+        void await_resume() const noexcept {}
+    };
+
+    PreviewSession::PreviewSession() : m_ui(ViewerHost::Get().Ui()) {}
+
+    void PreviewSession::Show(core::ipc::ShowPayload const& payload)
+    {
+        core::perf::Mark("show_request");
+        if (payload.items.empty())
+        {
+            FL_LOG_INFO(L"Show without items ignored");
+            return;
+        }
+
+        m_items = payload.items;
+        m_index = std::min<size_t>(payload.index, m_items.size() - 1);
+        m_navMode = payload.navMode;
+        m_listComplete = payload.listComplete;
+        m_explorer = reinterpret_cast<HWND>(static_cast<uintptr_t>(payload.explorerHwnd));
+        m_monitorHint = payload.monitor;
+        m_iconRect = payload.iconRect;
+        ++m_hideSerial; // a hide still animating out is abandoned
+        StartRequest(false);
+    }
+
+    bool PreviewSession::Toggle(core::ipc::ShowPayload const& payload)
+    {
+        if (m_visible && !payload.items.empty() && !m_items.empty())
+        {
+            auto const& target = payload.items[std::min<size_t>(payload.index, payload.items.size() - 1)];
+            if (SamePath(target.path, m_items[m_index].path))
+            {
+                Hide();
+                return false;
+            }
+        }
+        Show(payload);
+        return true;
+    }
+
+    void PreviewSession::UpdateItems(core::ipc::ItemsPayload const& payload)
+    {
+        if (payload.items.empty())
+        {
+            return;
+        }
+        size_t index = std::min<size_t>(payload.index, payload.items.size() - 1);
+        if (!m_items.empty())
+        {
+            // The user may already have navigated: keep pointing at what is displayed when it is in the new list.
+            auto const& shown = m_items[m_index].path;
+            auto const found = std::ranges::find_if(payload.items, [&](core::ipc::Item const& item) { return SamePath(item.path, shown); });
+            if (found != payload.items.end())
+            {
+                index = static_cast<size_t>(found - payload.items.begin());
+            }
+        }
+        m_items = payload.items;
+        m_index = index;
+        m_navMode = payload.navMode;
+        m_listComplete = true;
+    }
+
+    void PreviewSession::Navigate(int delta)
+    {
+        if (!m_visible || m_items.empty())
+        {
+            return;
+        }
+        auto const next = static_cast<int64_t>(m_index) + delta;
+        if (next < 0 || next >= static_cast<int64_t>(m_items.size()))
+        {
+            return; // decision 29: no wrap-around
+        }
+        core::perf::Mark("nav_request");
+        m_index = static_cast<size_t>(next);
+        StartRequest(true);
+    }
+
+    void PreviewSession::Zoom(ZoomCommand command)
+    {
+        if (m_attached)
+        {
+            if (auto* zoomable = dynamic_cast<IZoomable*>(m_attached->previewer.get()))
+            {
+                zoomable->Zoom(command);
+            }
+        }
+    }
+
+    bool PreviewSession::ExecutePreviewerCommand(std::wstring_view command)
+    {
+        if (m_attached)
+        {
+            if (auto* target = dynamic_cast<ICommandTarget*>(m_attached->previewer.get()))
+            {
+                return target->Execute(command);
+            }
+        }
+        return false;
+    }
+
+    std::optional<PreviewItem> PreviewSession::CurrentItem() const
+    {
+        if (m_items.empty())
+        {
+            return std::nullopt;
+        }
+        if (m_current)
+        {
+            return m_current->item;
+        }
+        if (SamePath(m_shownItem.ref.path, m_items[m_index].path))
+        {
+            return m_shownItem;
+        }
+        PreviewItem item;
+        item.ref = m_items[m_index];
+        return item;
+    }
+
+    void PreviewSession::StartRequest(bool fromNavigation)
+    {
+        CancelCurrent();
+
+        auto& host = ViewerHost::Get();
+        auto* window = host.Window();
+
+        auto req = std::make_shared<Request>();
+        req->id = ++m_nextRequestId;
+        req->ref = m_items[m_index];
+        req->fromNavigation = fromNavigation;
+        req->item.ref = req->ref;
+        m_current = req;
+
+        window->SetTitleText(winrt::hstring{core::BaseName(req->ref.path)});
+
+        if (!m_visible)
+        {
+            // Decision 27: visible at once in the Loading state, sized by the file type; no waiting for classification.
+            auto const monitor = ResolveMonitor(false);
+            window->ShowLoading();
+            auto const rect = core::FitPreviewWindow(DefaultSizeFor(req->ref.path), false, monitor.work, monitor.scale);
+            m_visible = true;
+            window->AppWindow().IsShownInSwitchers(true);
+            anim::In(host.CurrentWindow(), m_iconRect, rect);
+            ForceForeground(window->Hwnd());
+            WatchFirstFrame();
+            if (host.Callbacks().previewShown)
+            {
+                host.Callbacks().previewShown();
+            }
+        }
+
+        RunRequestAsync(req);
+    }
+
+    winrt::fire_and_forget PreviewSession::RunRequestAsync(std::shared_ptr<Request> req)
+    {
+        auto self = shared_from_this();
+        auto const ui = m_ui;
+        bool const useShellHandlers = ViewerHost::Get().Settings().preview.useShellHandlers;
+
+        co_await winrt::resume_background();
+        Classified classified;
+        if (!req->cancelled)
+        {
+            classified = Classify(req->ref, useShellHandlers);
+        }
+        co_await ResumeOn(ui);
+        if (!IsCurrent(req))
+        {
+            co_return;
+        }
+
+        auto const& cls = classified.classification;
+        req->item.kind = cls.kind;
+        req->item.shellHandlerClsid = cls.shellHandlerClsid;
+        req->item.cloudPlaceholder = cls.cloudPlaceholder;
+        m_shownItem = req->item;
+
+        std::optional<FallbackInfo> fallback = classified.missing;
+        Stage stage = (fallback || cls.kind == PreviewerKind::Fallback) ? Stage::Fallback : Stage::Classified;
+        auto const monitor = ResolveMonitor(true);
+
+        std::shared_ptr<PrepareRun> good;
+        winrt::Microsoft::UI::Xaml::UIElement view{nullptr};
+        PreviewerKind shownKind = PreviewerKind::Fallback;
+
+        while (!good)
+        {
+            std::shared_ptr<IPreviewer> previewer;
+            try
+            {
+                switch (stage)
+                {
+                case Stage::Classified:
+                    previewer = CreatePreviewer(cls.kind);
+                    shownKind = cls.kind;
+                    break;
+                case Stage::Fallback:
+                    previewer = CreatePreviewer(PreviewerKind::Fallback);
+                    shownKind = PreviewerKind::Fallback;
+                    break;
+                case Stage::Placeholder:
+                    previewer = MakePlaceholderPreviewer(L"Fallback");
+                    shownKind = PreviewerKind::Fallback;
+                    break;
+                }
+            }
+            catch (...)
+            {
+                previewer = nullptr;
+            }
+
+            std::optional<FallbackInfo> failure;
+            if (!previewer)
+            {
+                failure = FallbackInfo{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
+            }
+            else
+            {
+                auto run = std::make_shared<PrepareRun>();
+                run->previewer = previewer;
+                req->run = run;
+                StartPrepare(run, req->item, MakeContext(monitor, fallback));
+
+                co_await WaitForPrepare{this, run};
+
+                if (!IsCurrent(req))
+                {
+                    co_return; // superseded: Retire() already took over the run
+                }
+                if (run->timedOut)
+                {
+                    Retire(run); // Unload happens once PrepareAsync really completes
+                    failure = FallbackInfo{std::wstring{Str(L"Common", L"TimedOut")}, std::nullopt};
+                }
+                else
+                {
+                    try
+                    {
+                        run->action.GetResults();
+                        view = previewer->View();
+                        good = run;
+                    }
+                    catch (winrt::hresult_error const& e)
+                    {
+                        failure = DescribeFailure(e);
+                    }
+                    catch (...)
+                    {
+                        failure = FallbackInfo{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
+                    }
+                    if (!good)
+                    {
+                        try
+                        {
+                            previewer->Unload();
+                        }
+                        catch (...)
+                        {
+                        }
+                    }
+                }
+                req->run = nullptr;
+            }
+
+            if (good)
+            {
+                break;
+            }
+            if (stage == Stage::Placeholder)
+            {
+                FL_LOG_INFO(L"No previewer could be shown");
+                co_return;
+            }
+            fallback = std::move(failure);
+            stage = stage == Stage::Classified ? Stage::Fallback : Stage::Placeholder;
+        }
+
+        Attach(req, good, view, KindName(shownKind));
+    }
+
+    bool PreviewSession::IsCurrent(std::shared_ptr<Request> const& req) const
+    {
+        return m_current == req && !req->cancelled;
+    }
+
+    void PreviewSession::CancelCurrent()
+    {
+        if (!m_current)
+        {
+            return;
+        }
+        m_current->cancelled = true;
+        Retire(m_current->run);
+        m_current.reset();
+    }
+
+    void PreviewSession::StartPrepare(std::shared_ptr<PrepareRun> const& run, PreviewItem item, std::shared_ptr<PreviewContext const> ctx)
+    {
+        try
+        {
+            run->action = run->previewer->PrepareAsync(std::move(item), std::move(ctx));
+        }
+        catch (...)
+        {
+            run->action = Rethrow(std::current_exception());
+        }
+
+        // Weak run: whoever still cares holds it (request, m_retiring); a nobody-cares run needs no completion handling.
+        run->action.Completed([weakSelf = weak_from_this(), weakRun = std::weak_ptr<PrepareRun>{run}, ui = m_ui](auto const&, auto) {
+            ui.TryEnqueue([weakSelf, weakRun] {
+                auto session = weakSelf.lock();
+                auto run = weakRun.lock();
+                if (session && run)
+                {
+                    session->OnPrepareCompleted(run);
+                }
+            });
+        });
+    }
+
+    void PreviewSession::OnPrepareCompleted(std::shared_ptr<PrepareRun> const& run)
+    {
+        run->completed = true;
+        if (run->timer)
+        {
+            run->timer.Stop();
+            run->timer = nullptr;
+        }
+        if (run->retired)
+        {
+            std::erase(m_retiring, run);
+            try
+            {
+                run->previewer->Unload();
+            }
+            catch (...)
+            {
+            }
+        }
+        if (auto waiter = std::exchange(run->waiter, {}))
+        {
+            waiter.resume();
+        }
+    }
+
+    void PreviewSession::Retire(std::shared_ptr<PrepareRun> const& run)
+    {
+        if (!run || run->retired)
+        {
+            return;
+        }
+        run->retired = true;
+        if (run->action)
+        {
+            try
+            {
+                run->action.Cancel();
+            }
+            catch (...)
+            {
+            }
+        }
+        if (run->completed)
+        {
+            try
+            {
+                run->previewer->Unload();
+            }
+            catch (...)
+            {
+            }
+        }
+        else
+        {
+            m_retiring.push_back(run);
+        }
+    }
+
+    std::shared_ptr<PreviewContext> PreviewSession::MakeContext(Monitor const& monitor, std::optional<FallbackInfo> fallback)
+    {
+        auto& host = ViewerHost::Get();
+        auto ctx = std::make_shared<PreviewContext>();
+        ctx->hwnd = host.Window()->Hwnd();
+        ctx->ui = m_ui;
+        ctx->scale = monitor.scale;
+        ctx->maxContentDip = {static_cast<float>(monitor.work.w * core::kMaxWorkAreaFraction / monitor.scale),
+                              static_cast<float>(monitor.work.h * core::kMaxWorkAreaFraction / monitor.scale - core::kTitleBarDip)};
+        ctx->dark = host.Dark();
+        ctx->settings = host.Settings();
+        ctx->fallback = std::move(fallback);
+        ctx->requestResize = [weakSelf = weak_from_this(), ui = m_ui] {
+            ui.TryEnqueue([weakSelf] {
+                if (auto session = weakSelf.lock())
+                {
+                    session->FitWindow(true);
+                }
+            });
+        };
+        return ctx;
+    }
+
+    void PreviewSession::Attach(std::shared_ptr<Request> const& req, std::shared_ptr<PrepareRun> const& run,
+                                winrt::Microsoft::UI::Xaml::UIElement const& view, std::string_view kindName)
+    {
+        auto& host = ViewerHost::Get();
+        auto* window = host.Window();
+
+        auto previous = std::move(m_attached);
+        window->SetContent(view);
+        m_attached = run;
+        m_current.reset();
+        if (previous)
+        {
+            try
+            {
+                previous->previewer->Unload();
+            }
+            catch (...)
+            {
+            }
+        }
+
+        FitWindow(false);
+
+        core::perf::Mark("content_ready", std::string{"kind="}.append(kindName));
+        if (req->fromNavigation && host.Callbacks().navigated)
+        {
+            host.Callbacks().navigated(m_shownItem, m_navMode, m_explorer);
+        }
+        if (host.contentReady)
+        {
+            host.contentReady();
+        }
+    }
+
+    PreviewSession::Monitor PreviewSession::ResolveMonitor(bool preferWindow) const
+    {
+        HMONITOR monitor = nullptr;
+        MONITORINFO info{sizeof(info)};
+        if (preferWindow)
+        {
+            if (HWND const hwnd = ViewerHost::Get().Window()->Hwnd())
+            {
+                monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            }
+        }
+        else if (m_monitorHint != 0)
+        {
+            monitor = reinterpret_cast<HMONITOR>(static_cast<uintptr_t>(m_monitorHint));
+        }
+        if (monitor == nullptr || !GetMonitorInfoW(monitor, &info))
+        {
+            POINT cursor{};
+            GetCursorPos(&cursor);
+            monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+            GetMonitorInfoW(monitor, &info);
+        }
+
+        UINT dpiX = USER_DEFAULT_SCREEN_DPI, dpiY = USER_DEFAULT_SCREEN_DPI;
+        GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &dpiX, &dpiY);
+
+        Monitor result;
+        result.work = {info.rcWork.left, info.rcWork.top, info.rcWork.right - info.rcWork.left, info.rcWork.bottom - info.rcWork.top};
+        result.scale = dpiX / static_cast<double>(USER_DEFAULT_SCREEN_DPI);
+        return result;
+    }
+
+    void PreviewSession::FitWindow(bool force)
+    {
+        if (!m_visible || !m_attached)
+        {
+            return;
+        }
+        auto const& previewer = *m_attached->previewer;
+        auto const preferred = previewer.PreferredSize();
+        if (preferred.Width <= 0 || preferred.Height <= 0)
+        {
+            return; // no opinion: keep the size the window has
+        }
+
+        auto& host = ViewerHost::Get();
+        auto const window = host.CurrentWindow();
+        auto const monitor = ResolveMonitor(true);
+        core::RectI const target = core::FitPreviewWindow({preferred.Width, preferred.Height}, previewer.KeepAspect(), monitor.work, monitor.scale);
+
+        auto const position = window.AppWindow().Position();
+        auto const size = window.AppWindow().Size();
+        core::RectI const current{position.X, position.Y, size.Width, size.Height};
+
+        bool const changed = force ? target != current
+                                   : std::abs(target.w - current.w) > current.w * 0.1 || std::abs(target.h - current.h) > current.h * 0.1;
+        if (changed)
+        {
+            anim::Resize(window, current, target);
+        }
+    }
+
+    void PreviewSession::WatchFirstFrame()
+    {
+        using winrt::Microsoft::UI::Xaml::Media::CompositionTarget;
+        if (m_renderToken)
+        {
+            CompositionTarget::Rendering(m_renderToken);
+            m_renderToken = {};
+        }
+        m_renderToken = CompositionTarget::Rendering([weakSelf = weak_from_this()](auto const&, auto const&) {
+            if (auto session = weakSelf.lock(); session && session->m_renderToken)
+            {
+                CompositionTarget::Rendering(session->m_renderToken);
+                session->m_renderToken = {};
+                core::perf::Mark("window_visible");
+            }
+        });
+    }
+
+    void PreviewSession::Hide()
+    {
+        if (!m_visible)
+        {
+            return;
+        }
+        m_visible = false;
+        CancelCurrent();
+        HideAsync(++m_hideSerial);
+    }
+
+    winrt::fire_and_forget PreviewSession::HideAsync(uint64_t serial)
+    {
+        auto self = shared_from_this();
+        auto& host = ViewerHost::Get();
+        auto const window = host.CurrentWindow();
+        auto const iconRect = m_iconRect;
+        HWND const explorer = m_explorer;
+        HWND const hwnd = host.Window()->Hwnd();
+
+        try
+        {
+            co_await anim::Out(window, iconRect);
+        }
+        catch (...)
+        {
+        }
+        if (serial != m_hideSerial)
+        {
+            co_return; // shown again while the window was animating out
+        }
+
+        window.AppWindow().Hide();
+        window.AppWindow().IsShownInSwitchers(false);
+        if (m_renderToken)
+        {
+            winrt::Microsoft::UI::Xaml::Media::CompositionTarget::Rendering(m_renderToken);
+            m_renderToken = {};
+        }
+
+        // Unload only once the view is out of the window; an attached previewer's PrepareAsync has completed by definition.
+        host.Window()->ClearContent();
+        if (auto attached = std::exchange(m_attached, nullptr))
+        {
+            try
+            {
+                attached->previewer->Unload();
+            }
+            catch (...)
+            {
+            }
+        }
+        core::perf::Mark("hidden");
+
+        // Give the foreground back to the Explorer window the preview was opened from (decision 25).
+        if (explorer != nullptr && IsWindow(explorer))
+        {
+            HWND const foreground = GetForegroundWindow();
+            if (foreground == nullptr || foreground == hwnd)
+            {
+                SetForegroundWindow(explorer);
+            }
+        }
+
+        if (host.Callbacks().previewHidden)
+        {
+            host.Callbacks().previewHidden();
+        }
+        if (host.Behavior() == CloseBehavior::ExitProcess)
+        {
+            host.ExitApp();
+        }
+    }
+}

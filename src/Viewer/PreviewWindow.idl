@@ -1,0 +1,10 @@
+namespace FastLook
+{
+    // Frame of the preview: a 48 px title-bar row and the content host. The members the session needs are C++-only
+    // (winrt::get_self<implementation::PreviewWindow>).
+    [default_interface]
+    runtimeclass PreviewWindow : Microsoft.UI.Xaml.Window
+    {
+        PreviewWindow();
+    }
+}
