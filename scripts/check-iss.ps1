@@ -66,7 +66,7 @@ Check 'task autostart (checked by default)' ($text -match '(?m)^Name: "autostart
 Check 'autostart task texts EN + RU' ($text -match 'Start FastLook with Windows' -and $text -match 'Запускать FastLook вместе с Windows')
 $runKey = 'Software\Microsoft\Windows\CurrentVersion\Run'
 Check 'Registry Run value (HKCU, FastLook, autostart, uninsdeletevalue)' (
-    $text.Contains('Root: HKCU; Subkey: "' + $runKey + '"; ValueType: string; ValueName: "FastLook"; ValueData: """{app}\FastLook.exe"""; Tasks: autostart; Flags: uninsdeletevalue'))
+    $text.Contains('Root: HKCU; Subkey: "' + $runKey + '"; ValueType: string; ValueName: "FastLook"; ValueData: """{app}\FastLook.exe"""; Tasks: autostart; Check: ShouldWriteAutostart; Flags: uninsdeletevalue'))
 Check 'Icons {userprograms}\FastLook' ($text.Contains('Name: "{userprograms}\FastLook"; Filename: "{app}\FastLook.exe"'))
 Check 'Run FastLook.exe nowait postinstall, no skipifsilent' (
     $text -match '(?m)^Filename: "\{app\}\\FastLook\.exe";.*nowait postinstall' -and $text -notmatch 'skipifsilent')
@@ -77,7 +77,12 @@ Check 'usPostUninstall data prompt, default No, DelTree LOCALAPPDATA' (
 Check 'prompt texts EN + RU' ($text.Contains('Delete FastLook settings and logs?') -and $text.Contains('Удалить настройки и журналы FastLook?'))
 Check 'prompt skipped when silent' ($text.Contains('if not UninstallSilent then'))
 Check 'RegDeleteValue Run\FastLook (also when silent)' (
-    $text.Contains("RegDeleteValue(HKEY_CURRENT_USER, '$runKey', 'FastLook')"))
+    $text.Contains("RegDeleteValue(HKEY_CURRENT_USER, RunKey, 'FastLook')") -and $text.Contains("RunKey = '$runKey'"))
+Check 'silent upgrade keeps autostart state (Check: ShouldWriteAutostart)' (
+    $text.Contains('function ShouldWriteAutostart') -and $text.Contains('WizardSilent and RegKeyExists') -and $text.Contains("RegValueExists(HKEY_CURRENT_USER, RunKey, 'FastLook')"))
+Check 'shutdown: one retry, silent taskkill fallback, interactive Retry' (
+    $text.Contains('TryShutdown(Exe) = 0) or (TryShutdown(Exe) = 0)') -and $text.Contains('taskkill.exe') -and $text.Contains('MB_RETRYCANCEL'))
+Check '[InstallDelete] removes stale runtime files' ($text -match '(?m)^\[InstallDelete\]' -and $text.Contains('Name: "{app}\*.dll"'))
 Check 'UTF-8 BOM (Russian strings)' ([IO.File]::ReadAllBytes((Resolve-Path $Iss))[0..2] -join ',' -eq '239,187,191')
 
 # Files: every Source resolves against StageDir.
@@ -99,7 +104,7 @@ $defined = @([regex]::Matches($text, '(?m)^\s*#define\s+(\w+)') | ForEach-Object
 $used = @([regex]::Matches($text, '\{#(\w+)\}') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
 foreach ($u in $used) { Check "define {#$u} is passed or defined" (($passed + $defined) -contains $u) }
 foreach ($p in $passed) { Check "/D$p is guarded with #ifndef + #error" ($text -match "(?s)#ifndef $p\s+#error") }
-Check "Version.h version $headerVersion matches -Version $Version" ($Version -eq $headerVersion -or $PSBoundParameters.ContainsKey('Version'))
+Check "-Version $Version equals Version.h $headerVersion" ($Version -eq $headerVersion)
 if ($defined -contains 'AppVersion') { Check '#define AppVersion matches Version.h' ($text -match "#define\s+AppVersion\s+""$([regex]::Escape($headerVersion))""") }
 
 if ($script:failed) { Write-Host 'check-iss: FAIL'; exit 1 }

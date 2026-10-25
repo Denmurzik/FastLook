@@ -38,8 +38,8 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 [CustomMessages]
 english.AutostartTask=Start FastLook with Windows
 russian.AutostartTask=Запускать FastLook вместе с Windows
-english.StillRunning=FastLook is still running and could not be stopped. Exit it from the tray icon and run Setup again.
-russian.StillRunning=FastLook всё ещё работает и не удалось его остановить. Закройте его через значок в трее и запустите установку снова.
+english.StillRunning=FastLook is still running and could not be stopped. Exit it from the tray icon (or end FastLook.exe in Task Manager) and click Retry.
+russian.StillRunning=FastLook всё ещё работает, и его не удалось остановить. Закройте его через значок в трее (или завершите FastLook.exe в диспетчере задач) и нажмите «Повторить».
 english.DeleteData=Delete FastLook settings and logs?
 russian.DeleteData=Удалить настройки и журналы FastLook?
 
@@ -49,49 +49,90 @@ Name: "autostart"; Description: "{cm:AutostartTask}"
 [Files]
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 
+[InstallDelete]
+; Runtime files of the previous version that a newer stage may no longer ship (stale DLLs). Top level only: the uninstaller
+; (unins*.exe) and subfolders are left alone; the installed layout keeps no user data in {app}.
+Type: files; Name: "{app}\*.dll"
+Type: files; Name: "{app}\*.pri"
+Type: files; Name: "{app}\*.xbf"
+Type: files; Name: "{app}\*.winmd"
+Type: files; Name: "{app}\*.txt"
+
 [Icons]
 Name: "{userprograms}\FastLook"; Filename: "{app}\FastLook.exe"
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "FastLook"; ValueData: """{app}\FastLook.exe"""; Tasks: autostart; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "FastLook"; ValueData: """{app}\FastLook.exe"""; Tasks: autostart; Check: ShouldWriteAutostart; Flags: uninsdeletevalue
 
 [Run]
 Filename: "{app}\FastLook.exe"; Description: "{cm:LaunchProgram,FastLook}"; Flags: nowait postinstall
 
 [Code]
+const
+  RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
+  UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{6F1C2A9E-3B4D-4E8F-A1C7-5D2E9B0F4A63}_is1';
+
+// Fresh install (or interactive upgrade): honour the autostart task. Silent upgrade (the updater): keep the user's current state,
+// i.e. never re-create a Run value that was removed in Settings.
+function ShouldWriteAutostart: Boolean;
+begin
+  if WizardSilent and RegKeyExists(HKEY_CURRENT_USER, UninstallKey) then
+    Result := RegValueExists(HKEY_CURRENT_USER, RunKey, 'FastLook')
+  else
+    Result := True;
+end;
+
 // FastLook.exe --shutdown: exit 0 once the daemon (and its Viewer) is gone, 1 if still alive after 5 s.
-function StopFastLook(const ExeDir: String): Integer;
+function TryShutdown(const Exe: String): Integer;
+var
+  Code: Integer;
+begin
+  if Exec(Exe, '--shutdown', '', SW_HIDE, ewWaitUntilTerminated, Code) then
+    Result := Code
+  else
+    Result := 1;
+end;
+
+// True when FastLook is gone (or was never installed here). One retry; then silent runs kill the processes of the current
+// user (a per-user installer cannot touch other users' processes anyway), interactive runs offer Retry / Cancel.
+function StopFastLook(const ExeDir: String; Silent: Boolean): Boolean;
 var
   Exe: String;
   Code: Integer;
 begin
-  Result := 0;
+  Result := True;
   Exe := ExeDir + '\FastLook.exe';
-  if FileExists(Exe) then
+  if not FileExists(Exe) then
+    Exit;
+  while True do
   begin
-    if Exec(Exe, '--shutdown', '', SW_HIDE, ewWaitUntilTerminated, Code) then
-      Result := Code
-    else
-      Result := 1;
+    if (TryShutdown(Exe) = 0) or (TryShutdown(Exe) = 0) then
+      Exit;
+    if Silent then
+    begin
+      Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM FastLook.exe /IM FastLook.Viewer.exe /IM FastLook.PreviewHost.exe',
+        '', SW_HIDE, ewWaitUntilTerminated, Code);
+      Sleep(1000);
+      Exit;
+    end;
+    if MsgBox(CustomMessage('StillRunning'), mbError, MB_RETRYCANCEL) <> IDRETRY then
+    begin
+      Result := False;
+      Exit;
+    end;
   end;
 end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
-  if StopFastLook(ExpandConstant('{app}')) <> 0 then
+  if not StopFastLook(ExpandConstant('{app}'), WizardSilent) then
     Result := CustomMessage('StillRunning');
 end;
 
 function InitializeUninstall(): Boolean;
 begin
-  Result := True;
-  if StopFastLook(ExpandConstant('{app}')) <> 0 then
-  begin
-    if not UninstallSilent then
-      MsgBox(CustomMessage('StillRunning'), mbError, MB_OK);
-    Result := False;
-  end;
+  Result := StopFastLook(ExpandConstant('{app}'), UninstallSilent);
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
@@ -99,7 +140,7 @@ begin
   if CurUninstallStep = usPostUninstall then
   begin
     // Autostart may have been enabled later from Settings; uninsdeletevalue only covers the installer's own entry.
-    RegDeleteValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run', 'FastLook');
+    RegDeleteValue(HKEY_CURRENT_USER, RunKey, 'FastLook');
     if not UninstallSilent then
       if MsgBox(CustomMessage('DeleteData'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
         DelTree(ExpandConstant('{localappdata}\FastLook'), True, True, True);

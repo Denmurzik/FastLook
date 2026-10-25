@@ -4,10 +4,11 @@
   Release packaging: stages out/bin/<Configuration> (+ app-local VC++ runtime), smoke-tests the staged Viewer, then writes the
   portable zip and the Inno Setup installer to out/dist/ with .sha256 files (`<64 lowercase hex><two spaces><file name>\n`).
 .DESCRIPTION
-  Staging is out/stage/FastLook. Build artefacts (*.pdb/*.lib/*.exp/..., the test exe, gtest/gmock DLLs, RestartAgent.exe) are
+  Staging is out/stage/FastLook. Build artefacts (*.pdb/*.lib/*.exp/..., the test exe, gtest/gmock DLLs) are
   not copied; the stage must contain no WebView2 file. The zip is the stage plus an empty portable.txt (the installer does not
   ship it). Without Inno Setup (iscc) the installer is skipped with a warning after installer/FastLook.iss is checked by
   scripts/check-iss.ps1.
+  RestartAgent.exe is a Windows App SDK runtime file (Microsoft, Foundation runtimes-framework) and is kept.
 .EXAMPLE
   pwsh scripts/package.ps1 -NoBuild -SkipInstaller
 #>
@@ -54,7 +55,7 @@ if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force $stage, $dist | Out-Null
 
 $excludeFiles = @('*.pdb', '*.lib', '*.exp', '*.ilk', '*.iobj', '*.ipdb', '*.binlog',
-    'FastLook.Core.Tests.exe', 'gtest*.dll', 'gmock*.dll', 'RestartAgent.exe')
+    'FastLook.Core.Tests.exe', 'gtest*.dll', 'gmock*.dll')
 & robocopy $bin $stage /E /NFL /NDL /NJH /NJS /NP /XF @excludeFiles | Out-Null
 if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE" }
 
