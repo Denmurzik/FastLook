@@ -76,6 +76,7 @@ namespace fastlook::viewer
         winrt::fire_and_forget RunRequestAsync(std::shared_ptr<Request> req);
         winrt::fire_and_forget HideAsync(uint64_t serial);
 
+        void ShowFailure(std::shared_ptr<Request> const& req);
         bool IsCurrent(std::shared_ptr<Request> const& req) const;
         void CancelCurrent();
         void StartPrepare(std::shared_ptr<PrepareRun> const& run, PreviewItem item, std::shared_ptr<PreviewContext const> ctx);

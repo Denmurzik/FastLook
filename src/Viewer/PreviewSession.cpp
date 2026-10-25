@@ -422,7 +422,7 @@ namespace fastlook::viewer
                         {
                             run->action.GetResults();
                             view = previewer->View();
-                            Attach(req, run, view, KindName(shownKind)); // throws before changing anything if the view is rejected
+                            Attach(req, run, view, KindName(shownKind)); // may throw if the window rejects the view
                             good = run;
                         }
                         catch (winrt::hresult_error const& e)
@@ -463,6 +463,39 @@ namespace fastlook::viewer
         catch (...)
         {
             FL_LOG_INFO(L"Preview request failed with an exception");
+            ShowFailure(req);
+        }
+    }
+
+    void PreviewSession::ShowFailure(std::shared_ptr<Request> const& req)
+    {
+        // Never leave the window on Loading: drop the request and show the PreviewFailed text in place of the content.
+        try
+        {
+            if (!IsCurrent(req))
+            {
+                return;
+            }
+            CancelCurrent();
+            winrt::Microsoft::UI::Xaml::Controls::TextBlock text;
+            text.Text(Str(L"Common", L"PreviewFailed"));
+            text.HorizontalAlignment(winrt::Microsoft::UI::Xaml::HorizontalAlignment::Center);
+            text.VerticalAlignment(winrt::Microsoft::UI::Xaml::VerticalAlignment::Center);
+            ViewerHost::Get().Window()->SetContent(text);
+            if (auto previous = std::exchange(m_attached, nullptr))
+            {
+                try
+                {
+                    previous->previewer->Unload();
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+        catch (...)
+        {
+            FL_LOG_INFO(L"Showing the failure text failed");
         }
     }
 
@@ -606,7 +639,7 @@ namespace fastlook::viewer
         auto& host = ViewerHost::Get();
         auto* window = host.Window();
 
-        // The only step allowed to throw: nothing has changed yet, so the caller can fall back cleanly.
+        // The only step allowed to throw: if it does, the window keeps its previous content and the caller falls back.
         window->SetContent(view);
 
         auto previous = std::move(m_attached);

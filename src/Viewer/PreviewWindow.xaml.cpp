@@ -50,10 +50,18 @@ namespace winrt::FastLook::implementation
 
     void PreviewWindow::SetContent(UIElement const& view)
     {
-        ClearContent();
-        LoadingText().Visibility(Visibility::Collapsed);
-        m_content = view;
+        // Append first: if it throws, the old content (or the Loading text) is still intact.
         ContentHost().Children().Append(view);
+        LoadingText().Visibility(Visibility::Collapsed);
+        auto const old = std::exchange(m_content, view);
+        if (old)
+        {
+            uint32_t index = 0;
+            if (ContentHost().Children().IndexOf(old, index))
+            {
+                ContentHost().Children().RemoveAt(index);
+            }
+        }
     }
 
     void PreviewWindow::ClearContent()
