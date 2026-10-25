@@ -4,6 +4,8 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <winrt/Microsoft.UI.Dispatching.h>
@@ -47,6 +49,8 @@ namespace fastlook::viewer
         void ZoomBy(float factor);
         void ResetZoom();
 
+        // Selection (mouse press-drag, double-click word, Ctrl+A) is kept as document rows (a continuation segment of a longer
+        // line is its own row) and UTF-16 columns. SelectedText is capped at 16 Mi UTF-16 units.
         bool HasSelection() const;
         std::wstring SelectedText() const;
         void SelectAll();
@@ -64,6 +68,23 @@ namespace fastlook::viewer
         {
             std::wstring text;
             bool continuation = false;
+            uint64_t number = 0; // logical line number (0-based); meaningless on a continuation row
+        };
+        // Scroll position: a document row plus, when wrapping, the visual line inside it.
+        struct ScrollPos
+        {
+            uint64_t row = 0;
+            uint32_t sub = 0;
+            auto operator<=>(ScrollPos const&) const = default;
+        };
+        // A laid-out row. Unwrapped rows longer than kWindowedLineUnits only contain the horizontally visible window
+        // [base, base + shown).
+        struct RowLayout
+        {
+            winrt::com_ptr<IDWriteTextLayout> layout;
+            size_t base = 0, shown = 0;
+            double width = 0;
+            uint32_t lines = 1;
         };
         struct RedrawGate
         {
@@ -85,12 +106,22 @@ namespace fastlook::viewer
         void RecoverFromDeviceLoss(HRESULT hr);
         void Draw();
         void DrawFrame(Frame& frame);
-        void DrawGutter(Frame& frame, uint64_t first, uint64_t last);
+        void DrawGutter(Frame& frame, std::vector<std::pair<double, uint64_t>> const& marks);
+        void DrawSelection(Frame& frame, uint64_t rowIndex, Row const& row, RowLayout const& rl, double originX, double originY, bool nextIsContinuation);
         void DrawMessage(Frame& frame, std::wstring const& text);
         void FetchLines(uint64_t first, uint64_t count);
 
         uint64_t VisibleRows() const;
-        uint64_t MaxTop() const;
+        uint64_t MaxTop() const;                // unwrapped: the last top row that still fills the viewport
+        ScrollPos EndPos();                     // the furthest scroll position (wrapping: bottom of the last row at the viewport bottom)
+        double WrapWidth();                     // layout width of wrapped text; drops width-dependent caches when it changes
+        double TextLeft();
+        bool BuildLayout(std::wstring const& text, RowLayout& out, double wrapWidth);
+        uint32_t VisualLines(uint64_t row);     // wrapping: visual lines of a row
+        void NormalizeTop();
+        void SetTop(uint64_t row, uint32_t sub, bool followEnd = false);
+        void ScrollWrapped(int64_t visualLines);
+        void ApplyWrapChrome();
         double GutterWidth(); // also grows the (never shrinking) digit count
         double HorizontalMax();
         void ScrollLines(int64_t delta);
@@ -98,6 +129,15 @@ namespace fastlook::viewer
         void ScrollHorizontal(double deltaDip);
         void UpdateBars();
         void OnWheel(winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& e);
+
+        // Selection.
+        core::TextPos HitTest(double x, double y);
+        void OnPointerPressed(winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& e);
+        void OnPointerMoved(winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& e);
+        void EndDrag();
+        void OnDragTick();
+        void SelectWordAt(double x, double y);
+        void SetCaret(core::TextPos pos);
 
         std::shared_ptr<core::TextDocument> m_doc;
         std::shared_ptr<ILineStyler> m_styler;
@@ -144,6 +184,26 @@ namespace fastlook::viewer
         double m_wheelRemainder = 0;
         bool m_updatingBars = false;
         bool m_followEnd = false; // End was pressed: stay at the bottom while the index grows
+        uint32_t m_topSub = 0;    // wrapping: visual line of m_top shown at the viewport top
+        double m_zoomRemainder = 0;
+        double m_wrapWidth = 0;
+        std::unordered_map<uint64_t, uint32_t> m_lineCounts; // wrapping: visual lines per row (bounded)
+        bool m_endValid = false;
+        ScrollPos m_end;
+        uint64_t m_endLineCount = 0, m_endRows = 0;
+        double m_endWidth = 0;
+
+        // Selection: anchor is where the press happened, caret follows the pointer.
+        core::TextPos m_anchor, m_caret;
+        bool m_dragging = false;
+        double m_pointerX = 0, m_pointerY = 0;
+        winrt::Microsoft::UI::Dispatching::DispatcherQueueTimer m_dragTimer{nullptr};
+        winrt::Microsoft::UI::Dispatching::DispatcherQueueTimer::Tick_revoker m_dragTick;
+        winrt::Microsoft::UI::Xaml::UIElement::PointerPressed_revoker m_pressed;
+        winrt::Microsoft::UI::Xaml::UIElement::PointerMoved_revoker m_moved;
+        winrt::Microsoft::UI::Xaml::UIElement::PointerReleased_revoker m_released;
+        winrt::Microsoft::UI::Xaml::UIElement::PointerCaptureLost_revoker m_captureLost;
+        winrt::Microsoft::UI::Xaml::UIElement::DoubleTapped_revoker m_doubleTapped;
 
         // Text of the lines on screen.
         uint64_t m_cacheFirst = 0;

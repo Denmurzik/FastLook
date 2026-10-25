@@ -29,6 +29,12 @@ namespace fastlook::viewer
         // otherwise be shaped on every redraw).
         constexpr size_t kWindowedLineUnits = 1000;
         constexpr size_t kWindowSlackColumns = 64;
+        constexpr double kWrapPadRight = 12;
+        constexpr size_t kMaxCopyUnits = 16u * 1024 * 1024;
+        constexpr uint64_t kCopyBatchRows = 2048;
+        constexpr size_t kLineCountCacheMax = 1024;
+        constexpr int64_t kDragIntervalMs = 50;
+        constexpr double kMaxDragRowsPerTick = 20;
 
         D2D1_COLOR_F Rgb(uint32_t rgb)
         {
@@ -49,6 +55,16 @@ namespace fastlook::viewer
         bool IsDeviceLoss(HRESULT hr)
         {
             return hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET || hr == D2DERR_RECREATE_TARGET;
+        }
+
+        bool IsWordUnit(wchar_t c)
+        {
+            if (c == L'_')
+            {
+                return true;
+            }
+            WORD type = 0;
+            return GetStringTypeW(CT_CTYPE1, &c, 1, &type) && (type & (C1_ALPHA | C1_DIGIT)) != 0;
         }
 
         bool FamilyExists(IDWriteFactory3* factory, wchar_t const* family)
@@ -73,7 +89,7 @@ namespace fastlook::viewer
     struct CodeView::Frame
     {
         ID2D1DeviceContext* dc = nullptr;
-        winrt::com_ptr<ID2D1SolidColorBrush> text, gutterBackground, gutterText, separator;
+        winrt::com_ptr<ID2D1SolidColorBrush> text, gutterBackground, gutterText, separator, selection;
         winrt::com_ptr<ID2D1SolidColorBrush> token[kCategoryCount];
         double gutterWidth = 0;
     };
@@ -127,6 +143,16 @@ namespace fastlook::viewer
         m_rootChanged.revoke();
         m_vChanged.revoke();
         m_hChanged.revoke();
+        m_pressed.revoke();
+        m_moved.revoke();
+        m_released.revoke();
+        m_captureLost.revoke();
+        m_doubleTapped.revoke();
+        m_dragTick.revoke();
+        if (m_dragTimer)
+        {
+            m_dragTimer.Stop();
+        }
         if (m_image)
         {
             m_image.Source(nullptr);
@@ -193,6 +219,23 @@ namespace fastlook::viewer
         m_wheel = m_root.PointerWheelChanged(winrt::auto_revoke, [this](auto const&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& e) {
             OnWheel(e);
         });
+        m_pressed = m_host.PointerPressed(winrt::auto_revoke, [this](auto const&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& e) {
+            OnPointerPressed(e);
+        });
+        m_moved = m_host.PointerMoved(winrt::auto_revoke, [this](auto const&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& e) {
+            OnPointerMoved(e);
+        });
+        m_released = m_host.PointerReleased(winrt::auto_revoke, [this](auto const&, auto const&) { EndDrag(); });
+        m_captureLost = m_host.PointerCaptureLost(winrt::auto_revoke, [this](auto const&, auto const&) { EndDrag(); });
+        m_doubleTapped = m_host.DoubleTapped(winrt::auto_revoke, [this](auto const&, winrt::Microsoft::UI::Xaml::Input::DoubleTappedRoutedEventArgs const& e) {
+            auto const point = e.GetPosition(m_host);
+            SelectWordAt(point.X, point.Y);
+            e.Handled(true);
+        });
+        m_dragTimer = m_root.DispatcherQueue().CreateTimer();
+        m_dragTimer.Interval(std::chrono::milliseconds(kDragIntervalMs));
+        m_dragTimer.IsRepeating(true);
+        m_dragTick = m_dragTimer.Tick(winrt::auto_revoke, [this](auto const&, auto const&) { OnDragTick(); });
         m_themeChanged = m_root.ActualThemeChanged(winrt::auto_revoke, [this](auto const&, auto const&) {
             SetDark(m_root.ActualTheme() == ElementTheme::Dark);
         });
@@ -234,7 +277,27 @@ namespace fastlook::viewer
 
     void CodeView::SetWrap(bool wrap)
     {
-        m_wrap = wrap; // wrapping itself arrives with the selection/wrap task
+        if (wrap == m_wrap)
+        {
+            return;
+        }
+        // The top row stays in view; the visual-line offset and the horizontal scroll do not carry over.
+        m_wrap = wrap;
+        m_topSub = 0;
+        m_hOffset = 0;
+        m_lineCounts.clear();
+        m_endValid = false;
+        ApplyWrapChrome();
+        UpdateBars();
+        Invalidate();
+    }
+
+    void CodeView::ApplyWrapChrome()
+    {
+        if (m_hbar)
+        {
+            m_hbar.Visibility(m_wrap ? Visibility::Collapsed : Visibility::Visible);
+        }
     }
 
     void CodeView::SetFontSize(float dip)
@@ -252,6 +315,7 @@ namespace fastlook::viewer
         }
         m_fontSize = size;
         m_maxLineW = 0;
+        m_topSub = 0;
         RebuildFormat();
         UpdateBars();
         Invalidate();
@@ -287,16 +351,76 @@ namespace fastlook::viewer
 
     bool CodeView::HasSelection() const
     {
-        return false;
+        return m_anchor != m_caret;
     }
 
+    // Copies in row batches so the text is capped (kMaxCopyUnits) however large the selection is; every batch is a guarded
+    // ExtractRange. A faulted file yields nothing.
     std::wstring CodeView::SelectedText() const
     {
-        return {};
+        if (!m_doc || !HasSelection())
+        {
+            return {};
+        }
+        core::TextPos const from = std::min(m_anchor, m_caret);
+        core::TextPos const to = std::max(m_anchor, m_caret);
+        std::wstring out;
+        for (uint64_t line = from.line; line <= to.line; line += kCopyBatchRows)
+        {
+            uint64_t const lastLine = std::min(to.line, line + kCopyBatchRows - 1);
+            core::TextPos const batchFrom = line == from.line ? from : core::TextPos{line, 0};
+            core::TextPos const batchTo = lastLine == to.line ? to : core::TextPos{lastLine, (std::numeric_limits<uint32_t>::max)()};
+            if (line != from.line)
+            {
+                std::wstring probe;
+                bool continuation = false;
+                if (!m_doc->LineText(line, probe, continuation))
+                {
+                    return {};
+                }
+                if (!continuation)
+                {
+                    out += L"\r\n";
+                }
+            }
+            out += m_doc->ExtractRange(batchFrom, batchTo);
+            if (m_doc->Faulted())
+            {
+                return {};
+            }
+            if (out.size() >= kMaxCopyUnits)
+            {
+                out.resize(kMaxCopyUnits);
+                if (IS_HIGH_SURROGATE(out.back()))
+                {
+                    out.pop_back();
+                }
+                break;
+            }
+            if (lastLine == to.line)
+            {
+                break;
+            }
+        }
+        return out;
     }
 
     void CodeView::SelectAll()
     {
+        if (!m_doc || m_lineCount == 0)
+        {
+            return;
+        }
+        uint64_t const last = m_lineCount - 1;
+        std::wstring text;
+        bool continuation = false;
+        if (!m_doc->LineText(last, text, continuation))
+        {
+            return;
+        }
+        m_anchor = {0, 0};
+        m_caret = {last, static_cast<uint32_t>(text.size())};
+        Invalidate();
     }
 
     bool CodeView::OnScrollKey(winrt::Windows::System::VirtualKey key, bool ctrl, bool shift)
@@ -330,8 +454,11 @@ namespace fastlook::viewer
             Invalidate();
             return true;
         case VirtualKey::End:
-            ScrollTo(MaxTop(), true);
+        {
+            ScrollPos const end = EndPos();
+            SetTop(end.row, end.sub, true);
             return true;
+        }
         default:
             return false;
         }
@@ -357,7 +484,9 @@ namespace fastlook::viewer
         }
         if (m_followEnd)
         {
-            m_top = MaxTop();
+            ScrollPos const end = EndPos();
+            m_top = end.row;
+            m_topSub = end.sub;
         }
         UpdateBars();
         if (touchesScreen || GutterWidth() != gutterBefore)
@@ -371,6 +500,8 @@ namespace fastlook::viewer
     void CodeView::RebuildFormat()
     {
         m_format = nullptr;
+        m_lineCounts.clear();
+        m_endValid = false;
         if (!m_dwrite)
         {
             return;
@@ -427,8 +558,154 @@ namespace fastlook::viewer
 
     double CodeView::HorizontalMax()
     {
+        if (m_wrap)
+        {
+            return 0;
+        }
         double const textWidth = m_viewW - GutterWidth() - kTextPadLeft;
         return std::max(0.0, m_maxLineW + kEndPad - textWidth);
+    }
+
+    double CodeView::TextLeft()
+    {
+        return GutterWidth() + kTextPadLeft;
+    }
+
+    double CodeView::WrapWidth()
+    {
+        double const width = std::max(m_charW * 8, m_viewW - TextLeft() - kWrapPadRight);
+        if (width != m_wrapWidth)
+        {
+            m_wrapWidth = width;
+            m_lineCounts.clear();
+            m_endValid = false;
+        }
+        return width;
+    }
+
+    // Lays one row out. Unwrapped: one visual line, long rows only for the visible columns. Wrapped: the whole row, broken at
+    // word boundaries (or anywhere inside a token wider than the view).
+    bool CodeView::BuildLayout(std::wstring const& text, RowLayout& out, double wrapWidth)
+    {
+        out = {};
+        if (text.empty() || !m_dwrite || !m_format)
+        {
+            return false;
+        }
+        std::wstring_view shown = text;
+        if (!m_wrap && text.size() > kWindowedLineUnits)
+        {
+            size_t start = static_cast<size_t>(std::max(0.0, std::floor(m_hOffset / m_charW) - kWindowSlackColumns));
+            start = std::min(start, text.size());
+            if (start > 0 && start < text.size() && IS_LOW_SURROGATE(text[start]))
+            {
+                --start;
+            }
+            size_t const columns = static_cast<size_t>(std::ceil(std::max(1.0, m_viewW - TextLeft()) / m_charW)) + 2 * kWindowSlackColumns;
+            shown = std::wstring_view{text}.substr(start, columns);
+            out.base = start;
+            out.width = static_cast<double>(text.size()) * m_charW;
+        }
+        out.shown = shown.size();
+        float const maxWidth = m_wrap ? static_cast<float>(wrapWidth) : 1.0e6f;
+        if (FAILED(m_dwrite->CreateTextLayout(shown.data(), static_cast<UINT32>(shown.size()), m_format.get(), maxWidth, static_cast<float>(m_lineH),
+                                              out.layout.put())))
+        {
+            out = {};
+            return false;
+        }
+        DWRITE_TEXT_METRICS metrics{};
+        if (m_wrap)
+        {
+            out.layout->SetWordWrapping(DWRITE_WORD_WRAPPING_EMERGENCY_BREAK);
+            out.layout->GetMetrics(&metrics);
+            out.lines = std::max<uint32_t>(1, metrics.lineCount);
+        }
+        else if (out.width == 0)
+        {
+            out.layout->GetMetrics(&metrics);
+            out.width = metrics.widthIncludingTrailingWhitespace;
+        }
+        return true;
+    }
+
+    uint32_t CodeView::VisualLines(uint64_t row)
+    {
+        if (!m_wrap)
+        {
+            return 1;
+        }
+        double const width = WrapWidth();
+        if (auto const it = m_lineCounts.find(row); it != m_lineCounts.end())
+        {
+            return it->second;
+        }
+        std::wstring text;
+        bool continuation = false;
+        if (!m_doc || !m_doc->LineText(row, text, continuation))
+        {
+            return 1;
+        }
+        RowLayout layout;
+        uint32_t const lines = BuildLayout(text, layout, width) ? layout.lines : 1;
+        if (m_lineCounts.size() >= kLineCountCacheMax)
+        {
+            m_lineCounts.clear();
+        }
+        m_lineCounts[row] = lines;
+        return lines;
+    }
+
+    CodeView::ScrollPos CodeView::EndPos()
+    {
+        if (!m_wrap || m_lineCount == 0 || m_viewW <= 0 || m_viewH <= 0)
+        {
+            return {MaxTop(), 0};
+        }
+        uint64_t const fit = VisibleRows();
+        double const width = WrapWidth();
+        if (m_endValid && m_endLineCount == m_lineCount && m_endRows == fit && m_endWidth == width)
+        {
+            return m_end;
+        }
+        // Walk back from the last row until the viewport is full.
+        uint64_t remaining = fit;
+        uint64_t row = m_lineCount - 1;
+        ScrollPos end{0, 0};
+        for (;;)
+        {
+            uint64_t const lines = VisualLines(row);
+            if (lines >= remaining)
+            {
+                end = {row, static_cast<uint32_t>(lines - remaining)};
+                break;
+            }
+            remaining -= lines;
+            if (row == 0)
+            {
+                break;
+            }
+            --row;
+        }
+        m_end = end;
+        m_endValid = true;
+        m_endLineCount = m_lineCount;
+        m_endRows = fit;
+        m_endWidth = width;
+        return end;
+    }
+
+    // The visual-line offset can fall off its row after a resize or zoom.
+    void CodeView::NormalizeTop()
+    {
+        if (m_wrap && m_topSub > 0 && m_top < m_lineCount)
+        {
+            m_topSub = std::min(m_topSub, VisualLines(m_top) - 1);
+        }
+        else if (!m_wrap)
+        {
+            m_topSub = 0;
+        }
     }
 
     void CodeView::UpdateBars()
@@ -438,8 +715,14 @@ namespace fastlook::viewer
             return;
         }
         uint64_t const rows = VisibleRows();
-        uint64_t const maxTop = MaxTop();
-        m_top = std::min(m_top, maxTop);
+        ScrollPos const end = EndPos();
+        uint64_t const maxTop = end.row;
+        if (ScrollPos{m_top, m_topSub} > end)
+        {
+            m_top = end.row;
+            m_topSub = end.sub;
+        }
+        NormalizeTop();
         double const maxH = HorizontalMax();
         m_hOffset = std::clamp(m_hOffset, 0.0, maxH);
         double const textViewport = std::max(1.0, m_viewW - GutterWidth());
@@ -466,6 +749,11 @@ namespace fastlook::viewer
 
     void CodeView::ScrollLines(int64_t delta)
     {
+        if (m_wrap)
+        {
+            ScrollWrapped(delta);
+            return;
+        }
         constexpr uint64_t kInt64Max = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
         int64_t const maxTop = static_cast<int64_t>(std::min(MaxTop(), kInt64Max));
         int64_t const target = std::clamp(static_cast<int64_t>(std::min(m_top, kInt64Max)) + delta, int64_t{0}, maxTop);
@@ -474,15 +762,72 @@ namespace fastlook::viewer
 
     void CodeView::ScrollTo(uint64_t top, bool followEnd)
     {
+        SetTop(top, 0, followEnd);
+    }
+
+    void CodeView::SetTop(uint64_t row, uint32_t sub, bool followEnd)
+    {
         m_followEnd = followEnd;
-        top = std::min(top, MaxTop());
-        if (top == m_top)
+        ScrollPos target{row, sub};
+        ScrollPos const end = EndPos();
+        if (target > end)
+        {
+            target = end;
+        }
+        if (target.row == m_top && target.sub == m_topSub)
         {
             return;
         }
-        m_top = top;
+        m_top = target.row;
+        m_topSub = target.sub;
         UpdateBars();
         Invalidate();
+    }
+
+    // Moves by visual lines through rows of different heights.
+    void CodeView::ScrollWrapped(int64_t visualLines)
+    {
+        if (m_lineCount == 0 || visualLines == 0)
+        {
+            return;
+        }
+        ScrollPos const end = EndPos();
+        uint64_t row = std::min(m_top, m_lineCount - 1);
+        int64_t sub = m_topSub;
+        if (visualLines > 0)
+        {
+            sub += visualLines;
+            for (;;)
+            {
+                if (ScrollPos{row, static_cast<uint32_t>(std::min<int64_t>(sub, std::numeric_limits<uint32_t>::max()))} >= end)
+                {
+                    SetTop(end.row, end.sub);
+                    return;
+                }
+                int64_t const lines = VisualLines(row);
+                if (sub < lines)
+                {
+                    break;
+                }
+                sub -= lines;
+                ++row;
+            }
+        }
+        else
+        {
+            sub += visualLines;
+            while (sub < 0)
+            {
+                if (row == 0)
+                {
+                    sub = 0;
+                    break;
+                }
+                --row;
+                sub += VisualLines(row);
+            }
+        }
+        SetTop(row, static_cast<uint32_t>(sub));
     }
 
     void CodeView::ScrollHorizontal(double deltaDip)
@@ -511,7 +856,14 @@ namespace fastlook::viewer
         bool const shift = (modifiers & VirtualKeyModifiers::Shift) != VirtualKeyModifiers::None;
         if (ctrl)
         {
-            ZoomSteps(notches > 0 ? 1 : -1);
+            // Touchpads send many small deltas: a zoom step per whole notch.
+            m_zoomRemainder += notches;
+            double whole = 0;
+            m_zoomRemainder = std::modf(m_zoomRemainder, &whole);
+            if (whole != 0)
+            {
+                ZoomSteps(static_cast<int>(whole));
+            }
         }
         else if (properties.IsHorizontalMouseWheel())
         {
@@ -572,6 +924,12 @@ namespace fastlook::viewer
         }
         m_image.Width(m_viewW);
         m_image.Height(m_viewH);
+        if (m_followEnd)
+        {
+            ScrollPos const end = EndPos();
+            m_top = end.row;
+            m_topSub = end.sub;
+        }
         UpdateBars();
         Draw(); // synchronously, so a resize never shows an empty surface
     }
@@ -652,6 +1010,20 @@ namespace fastlook::viewer
                 break;
             }
         }
+        // Rows are numbered by logical line: a continuation segment shares its line's number and is not printed.
+        uint64_t number = first;
+        if (!m_doc->LogicalLine(first, number))
+        {
+            number = first; // faulted: the rows are unreadable anyway
+        }
+        for (size_t i = 0; i < rows.size(); ++i)
+        {
+            if (i > 0 && !rows[i].continuation)
+            {
+                ++number;
+            }
+            rows[i].number = number;
+        }
         m_cache = std::move(rows);
         m_cacheFirst = first;
         m_cacheValid = true;
@@ -721,6 +1093,7 @@ namespace fastlook::viewer
                 makeBrush(palette.gutterBackground, frame.gutterBackground);
                 makeBrush(palette.gutterText, frame.gutterText);
                 makeBrush(palette.separator, frame.separator);
+                makeBrush(palette.selection, frame.selection);
                 for (size_t i = 0; i < kCategoryCount; ++i)
                 {
                     makeBrush(palette.token[i], frame.token[i]);
@@ -745,6 +1118,10 @@ namespace fastlook::viewer
         {
             RecoverFromDeviceLoss(endHr);
             return;
+        }
+        if (FAILED(endHr))
+        {
+            FL_LOG_INFO(L"CodeView: EndDraw failed: 0x{:08X}", static_cast<uint32_t>(endHr));
         }
 
         if (IsDeviceLoss(hr))
@@ -779,6 +1156,7 @@ namespace fastlook::viewer
     {
         auto* dc = frame.dc;
         frame.gutterWidth = GutterWidth();
+        NormalizeTop();
         uint64_t const first = std::min(m_top, m_lineCount);
         uint64_t const count = std::min<uint64_t>(VisibleRows() + 1, m_lineCount - first);
         FetchLines(first, count);
@@ -793,86 +1171,139 @@ namespace fastlook::viewer
         }
 
         double const textLeft = frame.gutterWidth + kTextPadLeft;
-        double const textWidth = std::max(1.0, m_viewW - textLeft);
+        double const wrapWidth = m_wrap ? WrapWidth() : 0;
+        double const xOrigin = textLeft - (m_wrap ? 0.0 : m_hOffset);
+        double y = m_wrap ? -static_cast<double>(m_topSub) * m_lineH : 0.0;
+        std::vector<std::pair<double, uint64_t>> marks; // gutter numbers: y of the row's first visual line, logical line
         std::vector<StyledRun> runs;
-        for (uint64_t i = 0; i < count; ++i)
+        for (uint64_t i = 0; i < count && y < m_viewH; ++i)
         {
-            std::wstring const& text = m_cache[static_cast<size_t>(i)].text;
-            if (text.empty())
+            Row const& row = m_cache[static_cast<size_t>(i)];
+            RowLayout rl;
+            bool const laidOut = BuildLayout(row.text, rl, wrapWidth);
+            if (laidOut)
             {
-                continue;
-            }
-            std::wstring_view shown = text;
-            size_t base = 0;
-            double lineWidth = 0;
-            if (text.size() > kWindowedLineUnits)
-            {
-                size_t start = static_cast<size_t>(std::max(0.0, std::floor(m_hOffset / m_charW) - kWindowSlackColumns));
-                start = std::min(start, text.size());
-                if (start > 0 && start < text.size() && IS_LOW_SURROGATE(text[start]))
+                if (m_wrap)
                 {
-                    --start;
+                    if (m_lineCounts.size() >= kLineCountCacheMax)
+                    {
+                        m_lineCounts.clear();
+                    }
+                    m_lineCounts[first + i] = rl.lines;
                 }
-                size_t const columns = static_cast<size_t>(std::ceil(textWidth / m_charW)) + 2 * kWindowSlackColumns;
-                shown = std::wstring_view{text}.substr(start, columns);
-                base = start;
-                lineWidth = static_cast<double>(text.size()) * m_charW;
-            }
-
-            winrt::com_ptr<IDWriteTextLayout> layout;
-            if (FAILED(m_dwrite->CreateTextLayout(shown.data(), static_cast<UINT32>(shown.size()), m_format.get(), 1.0e6f, static_cast<float>(m_lineH),
-                                                  layout.put())))
-            {
-                continue;
-            }
-            if (lineWidth == 0)
-            {
-                DWRITE_TEXT_METRICS metrics{};
-                layout->GetMetrics(&metrics);
-                lineWidth = metrics.widthIncludingTrailingWhitespace;
-            }
-            m_maxLineW = std::max(m_maxLineW, lineWidth);
-
-            if (m_styler)
-            {
-                runs.clear();
-                m_styler->StyleLine(first + i, text, runs);
-                for (auto const& run : runs)
+                else
                 {
-                    auto const category = static_cast<size_t>(run.category);
-                    if (run.category == TokenCategory::Default || category >= kCategoryCount || !frame.token[category])
-                    {
-                        continue;
-                    }
-                    size_t const from = std::max<size_t>(run.start, base);
-                    size_t const to = std::min<size_t>(static_cast<size_t>(run.start) + run.length, base + shown.size());
-                    if (to > from)
-                    {
-                        layout->SetDrawingEffect(frame.token[category].get(), DWRITE_TEXT_RANGE{static_cast<UINT32>(from - base), static_cast<UINT32>(to - from)});
-                    }
+                    m_maxLineW = std::max(m_maxLineW, rl.width);
                 }
             }
+            if (!row.continuation)
+            {
+                marks.emplace_back(y, row.number);
+            }
+            double const originX = xOrigin + static_cast<double>(rl.base) * m_charW;
+            DrawSelection(frame, first + i, row, rl, originX, y, i + 1 < count && m_cache[static_cast<size_t>(i + 1)].continuation);
 
-            D2D1_POINT_2F const origin{static_cast<float>(textLeft - m_hOffset + static_cast<double>(base) * m_charW), static_cast<float>(i * m_lineH)};
-            dc->DrawTextLayout(origin, layout.get(), frame.text.get(), D2D1_DRAW_TEXT_OPTIONS_NONE);
+            if (laidOut)
+            {
+                if (m_styler)
+                {
+                    runs.clear();
+                    m_styler->StyleLine(first + i, row.text, runs);
+                    for (auto const& run : runs)
+                    {
+                        auto const category = static_cast<size_t>(run.category);
+                        if (run.category == TokenCategory::Default || category >= kCategoryCount || !frame.token[category])
+                        {
+                            continue;
+                        }
+                        size_t const from = std::max<size_t>(run.start, rl.base);
+                        size_t const to = std::min<size_t>(static_cast<size_t>(run.start) + run.length, rl.base + rl.shown);
+                        if (to > from)
+                        {
+                            rl.layout->SetDrawingEffect(frame.token[category].get(),
+                                                        DWRITE_TEXT_RANGE{static_cast<UINT32>(from - rl.base), static_cast<UINT32>(to - from)});
+                        }
+                    }
+                }
+                dc->DrawTextLayout(D2D1::Point2F(static_cast<float>(originX), static_cast<float>(y)), rl.layout.get(), frame.text.get(),
+                                   D2D1_DRAW_TEXT_OPTIONS_NONE);
+            }
+            y += static_cast<double>(rl.lines) * m_lineH;
         }
-        DrawGutter(frame, first, count);
+        DrawGutter(frame, marks);
     }
 
-    void CodeView::DrawGutter(Frame& frame, uint64_t first, uint64_t count)
+    // Highlight of the part of one row inside the selection. A selection that runs past the end of the row also marks the line
+    // break with a cell-wide stub (unless the next row is just the continuation of this one).
+    void CodeView::DrawSelection(Frame& frame, uint64_t rowIndex, Row const& row, RowLayout const& rl, double originX, double originY,
+                                 bool nextIsContinuation)
+    {
+        if (!frame.selection || !HasSelection())
+        {
+            return;
+        }
+        core::TextPos const from = std::min(m_anchor, m_caret);
+        core::TextPos const to = std::max(m_anchor, m_caret);
+        if (rowIndex < from.line || rowIndex > to.line)
+        {
+            return;
+        }
+        size_t const size = row.text.size();
+        size_t const start = rowIndex == from.line ? std::min<size_t>(from.column, size) : 0;
+        size_t const end = rowIndex == to.line ? std::min<size_t>(to.column, size) : size;
+        auto* dc = frame.dc;
+
+        if (rl.layout)
+        {
+            size_t const windowStart = std::max(start, rl.base);
+            size_t const windowEnd = std::min(end, rl.base + rl.shown);
+            if (windowEnd > windowStart)
+            {
+                UINT32 needed = 0;
+                rl.layout->HitTestTextRange(static_cast<UINT32>(windowStart - rl.base), static_cast<UINT32>(windowEnd - windowStart),
+                                            static_cast<float>(originX), static_cast<float>(originY), nullptr, 0, &needed);
+                std::vector<DWRITE_HIT_TEST_METRICS> boxes(needed);
+                if (needed > 0 && SUCCEEDED(rl.layout->HitTestTextRange(static_cast<UINT32>(windowStart - rl.base),
+                                                                        static_cast<UINT32>(windowEnd - windowStart), static_cast<float>(originX),
+                                                                        static_cast<float>(originY), boxes.data(), needed, &needed)))
+                {
+                    for (UINT32 i = 0; i < needed; ++i)
+                    {
+                        auto const& b = boxes[i];
+                        dc->FillRectangle(D2D1::RectF(b.left, b.top, b.left + b.width, b.top + b.height), frame.selection.get());
+                    }
+                }
+            }
+        }
+
+        if (rowIndex < to.line && !nextIsContinuation && rl.base + rl.shown == size)
+        {
+            float x = static_cast<float>(originX), y = static_cast<float>(originY);
+            if (rl.layout)
+            {
+                DWRITE_HIT_TEST_METRICS metrics{};
+                float px = 0, py = 0;
+                BOOL trailing = FALSE;
+                if (SUCCEEDED(rl.layout->HitTestTextPosition(static_cast<UINT32>(rl.shown), trailing, &px, &py, &metrics)))
+                {
+                    x += px;
+                    y += py;
+                }
+            }
+            dc->FillRectangle(D2D1::RectF(x, y, x + static_cast<float>(m_charW), y + static_cast<float>(m_lineH)), frame.selection.get());
+        }
+    }
+
+    void CodeView::DrawGutter(Frame& frame, std::vector<std::pair<double, uint64_t>> const& marks)
     {
         auto* dc = frame.dc;
         float const width = static_cast<float>(frame.gutterWidth);
         float const hairline = static_cast<float>(1.0 / m_scale);
         dc->FillRectangle(D2D1::RectF(0, 0, width, static_cast<float>(m_viewH)), frame.gutterBackground.get());
         dc->FillRectangle(D2D1::RectF(width - hairline, 0, width, static_cast<float>(m_viewH)), frame.separator.get());
-        for (uint64_t i = 0; i < count; ++i)
+        for (auto const& [y, line] : marks)
         {
-            if (m_cache[static_cast<size_t>(i)].continuation)
-            {
-                continue; // a 16 384-unit split of a longer line is a storage artifact, not a line
-            }
-            std::wstring const number = std::to_wstring(first + i + 1);
+            std::wstring const number = std::to_wstring(line + 1);
             winrt::com_ptr<IDWriteTextLayout> layout;
             if (FAILED(m_dwrite->CreateTextLayout(number.c_str(), static_cast<UINT32>(number.size()), m_format.get(), 1000.0f,
                                                   static_cast<float>(m_lineH), layout.put())))
@@ -880,9 +1311,190 @@ namespace fastlook::viewer
                 continue;
             }
             double const x = frame.gutterWidth - kGutterPadRight - static_cast<double>(number.size()) * m_charW;
-            dc->DrawTextLayout(D2D1::Point2F(static_cast<float>(x), static_cast<float>(i * m_lineH)), layout.get(), frame.gutterText.get(),
+            dc->DrawTextLayout(D2D1::Point2F(static_cast<float>(x), static_cast<float>(y)), layout.get(), frame.gutterText.get(),
                                D2D1_DRAW_TEXT_OPTIONS_NONE);
         }
+    }
+
+    // ---- selection input -------------------------------------------------------------------------------------------
+
+    core::TextPos CodeView::HitTest(double x, double y)
+    {
+        if (!m_doc || m_lineCount == 0)
+        {
+            return {};
+        }
+        uint64_t const first = std::min(m_top, m_lineCount - 1);
+        uint64_t const count = std::min<uint64_t>(VisibleRows() + 1, m_lineCount - first);
+        FetchLines(first, count);
+        double const wrapWidth = m_wrap ? WrapWidth() : 0;
+        double rowY = m_wrap ? -static_cast<double>(m_topSub) * m_lineH : 0.0;
+        y = std::max(y, rowY);
+        for (size_t i = 0; i < m_cache.size(); ++i)
+        {
+            Row const& row = m_cache[i];
+            RowLayout rl;
+            bool const laidOut = BuildLayout(row.text, rl, wrapWidth);
+            double const height = static_cast<double>(rl.lines) * m_lineH;
+            bool const lastRow = i + 1 == m_cache.size();
+            if (y < rowY + height || lastRow)
+            {
+                size_t column = 0;
+                if (laidOut)
+                {
+                    if (y >= rowY + height)
+                    {
+                        column = row.text.size(); // below the last visible row
+                    }
+                    else
+                    {
+                        double const layoutX = x - TextLeft() + (m_wrap ? 0.0 : m_hOffset) - static_cast<double>(rl.base) * m_charW;
+                        BOOL trailing = FALSE, inside = FALSE;
+                        DWRITE_HIT_TEST_METRICS metrics{};
+                        if (SUCCEEDED(rl.layout->HitTestPoint(static_cast<float>(layoutX), static_cast<float>(y - rowY), &trailing, &inside, &metrics)))
+                        {
+                            column = rl.base + metrics.textPosition + (trailing ? metrics.length : 0);
+                        }
+                    }
+                }
+                return {first + i, static_cast<uint32_t>(std::min(column, row.text.size()))};
+            }
+            rowY += height;
+        }
+        return {first, 0};
+    }
+
+    void CodeView::SetCaret(core::TextPos pos)
+    {
+        if (pos != m_caret)
+        {
+            m_caret = pos;
+            Invalidate();
+        }
+    }
+
+    void CodeView::OnPointerPressed(winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& e)
+    {
+        auto const point = e.GetCurrentPoint(m_host);
+        if (!point.Properties().IsLeftButtonPressed())
+        {
+            return;
+        }
+        m_host.CapturePointer(e.Pointer());
+        m_pointerX = point.Position().X;
+        m_pointerY = point.Position().Y;
+        bool const shift = (e.KeyModifiers() & winrt::Windows::System::VirtualKeyModifiers::Shift) != winrt::Windows::System::VirtualKeyModifiers::None;
+        core::TextPos const hit = HitTest(m_pointerX, m_pointerY);
+        if (!shift)
+        {
+            m_anchor = hit;
+        }
+        m_caret = hit;
+        m_dragging = true;
+        m_dragTimer.Start();
+        Invalidate();
+        e.Handled(true);
+    }
+
+    void CodeView::OnPointerMoved(winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& e)
+    {
+        if (!m_dragging)
+        {
+            return;
+        }
+        auto const position = e.GetCurrentPoint(m_host).Position();
+        m_pointerX = position.X;
+        m_pointerY = position.Y;
+        SetCaret(HitTest(m_pointerX, std::clamp(m_pointerY, 0.0, std::max(0.0, m_viewH - 1))));
+        e.Handled(true);
+    }
+
+    void CodeView::EndDrag()
+    {
+        if (!std::exchange(m_dragging, false))
+        {
+            return;
+        }
+        m_dragTimer.Stop();
+        m_host.ReleasePointerCaptures();
+    }
+
+    // While the button is held outside the text area the view keeps scrolling that way and the caret follows.
+    void CodeView::OnDragTick()
+    {
+        if (!m_dragging)
+        {
+            return;
+        }
+        double over = 0;
+        if (m_pointerY < 0)
+        {
+            over = m_pointerY;
+        }
+        else if (m_pointerY > m_viewH)
+        {
+            over = m_pointerY - m_viewH;
+        }
+        if (over != 0)
+        {
+            double const rows = std::clamp(over / m_lineH, -kMaxDragRowsPerTick, kMaxDragRowsPerTick);
+            ScrollLines(static_cast<int64_t>(rows < 0 ? std::min(-1.0, std::floor(rows)) : std::max(1.0, std::ceil(rows))));
+        }
+        if (!m_wrap)
+        {
+            double const left = TextLeft();
+            double dx = 0;
+            if (m_pointerX < left)
+            {
+                dx = m_pointerX - left;
+            }
+            else if (m_pointerX > m_viewW)
+            {
+                dx = m_pointerX - m_viewW;
+            }
+            if (dx != 0)
+            {
+                ScrollHorizontal(std::clamp(dx, -kWheelHorizontalDipPerNotch, kWheelHorizontalDipPerNotch) / 2);
+            }
+        }
+        SetCaret(HitTest(m_pointerX, std::clamp(m_pointerY, 0.0, std::max(0.0, m_viewH - 1))));
+    }
+
+    // Double-click: the run of letters, digits and underscores under the pointer.
+    void CodeView::SelectWordAt(double x, double y)
+    {
+        core::TextPos const hit = HitTest(x, y);
+        std::wstring text;
+        bool continuation = false;
+        if (!m_doc || !m_doc->LineText(hit.line, text, continuation))
+        {
+            return;
+        }
+        size_t at = std::min<size_t>(hit.column, text.size());
+        if (at < text.size() && IsWordUnit(text[at]))
+        {
+            // on a word
+        }
+        else if (at > 0 && IsWordUnit(text[at - 1]))
+        {
+            --at;
+        }
+        else
+        {
+            return;
+        }
+        size_t begin = at, end = at + 1;
+        while (begin > 0 && IsWordUnit(text[begin - 1]))
+        {
+            --begin;
+        }
+        while (end < text.size() && IsWordUnit(text[end]))
+        {
+            ++end;
+        }
+        m_anchor = {hit.line, static_cast<uint32_t>(begin)};
+        m_caret = {hit.line, static_cast<uint32_t>(end)};
+        Invalidate();
     }
 
     void CodeView::DrawMessage(Frame& frame, std::wstring const& text)

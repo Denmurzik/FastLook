@@ -116,7 +116,7 @@ namespace fastlook::viewer
             state->changed.notify_all();
         });
 
-        // The first chunk (4 MiB, well past the 64 KiB the first screen needs) is indexed in milliseconds.
+        // The first chunk (64 KiB, enough for the first screen) is indexed in microseconds.
         {
             std::unique_lock lock{state->mutex};
             while (!state->firstReported && !cancel())
