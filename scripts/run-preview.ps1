@@ -40,7 +40,11 @@ New-Item -ItemType Directory -Force $tmp | Out-Null
 $perfLog = Join-Path $tmp 'perf.log'
 
 $argList = @()
-if ($File) { $argList += @('--preview', (Resolve-Path $File).Path) }
+if ($File) {
+    # Shell namespace paths (::{CLSID}, shell:...) are not file system paths.
+    $previewPath = if ($File -match '^(::|shell:)') { $File } else { (Resolve-Path $File).Path }
+    $argList += @('--preview', $previewPath)
+}
 $argList += @('--perf-log', $perfLog)
 $argList += $ExtraArgs
 
