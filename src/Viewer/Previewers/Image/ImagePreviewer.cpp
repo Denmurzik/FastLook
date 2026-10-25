@@ -47,6 +47,11 @@ namespace fastlook::viewer
         m_preferred = {static_cast<float>(m_native.w / ctx->scale), static_cast<float>(m_native.h / ctx->scale)};
         SoftwareBitmapSource source;
         co_await source.SetBitmapAsync(decoded.bitmap);
+        if (cancel())
+        {
+            source.Close();
+            co_return;
+        }
         m_baseSource = source;
         m_baseSize = {static_cast<uint32_t>(decoded.bitmap.PixelWidth()), static_cast<uint32_t>(decoded.bitmap.PixelHeight())};
     }
@@ -72,6 +77,7 @@ namespace fastlook::viewer
         m_redecodeStop.request_stop();
         ++m_generation;
         m_zoomView.reset();
+        CloseZoomSource();
         if (m_baseSource)
         {
             try
@@ -94,6 +100,7 @@ namespace fastlook::viewer
         if (zoom <= 1.001)
         {
             m_zoomView->ReplaceSource(m_baseSource);
+            CloseZoomSource();
             return;
         }
 
@@ -107,9 +114,24 @@ namespace fastlook::viewer
         if (Area(target) <= Area(m_baseSize))
         {
             m_zoomView->ReplaceSource(m_baseSource); // the base bitmap is already at least that sharp
+            CloseZoomSource();
             return;
         }
         Redecode(target, m_redecodeStop.get_token(), generation);
+    }
+
+    void ImagePreviewer::CloseZoomSource()
+    {
+        if (auto source = std::exchange(m_zoomSource, nullptr))
+        {
+            try
+            {
+                source.Close();
+            }
+            catch (...)
+            {
+            }
+        }
     }
 
     winrt::fire_and_forget ImagePreviewer::Redecode(core::SizeU target, std::stop_token stop, uint64_t generation)
@@ -138,9 +160,12 @@ namespace fastlook::viewer
             co_await source.SetBitmapAsync(decoded.bitmap);
             if (generation != self->m_generation || !self->m_zoomView)
             {
+                source.Close();
                 co_return;
             }
             self->m_zoomView->ReplaceSource(source);
+            self->CloseZoomSource();
+            self->m_zoomSource = source;
         }
         catch (...)
         {

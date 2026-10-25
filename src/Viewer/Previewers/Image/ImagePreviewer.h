@@ -27,6 +27,7 @@ namespace fastlook::viewer
 
     private:
         void OnZoomSettled(double zoom);
+        void CloseZoomSource();
         winrt::fire_and_forget Redecode(core::SizeU target, std::stop_token stop, uint64_t generation);
 
         std::filesystem::path m_path;
@@ -35,6 +36,7 @@ namespace fastlook::viewer
         core::SizeU m_baseSize{};    // pixels of the base bitmap
         winrt::Windows::Foundation::Size m_preferred{};
         winrt::Microsoft::UI::Xaml::Media::Imaging::SoftwareBitmapSource m_baseSource{nullptr};
+        winrt::Microsoft::UI::Xaml::Media::Imaging::SoftwareBitmapSource m_zoomSource{nullptr}; // current re-decode, if any
         std::unique_ptr<ZoomPanView> m_zoomView;
         std::stop_source m_redecodeStop;
         uint64_t m_generation = 0; // UI thread

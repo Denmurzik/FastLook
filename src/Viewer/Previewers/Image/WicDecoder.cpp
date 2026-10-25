@@ -4,7 +4,6 @@
 #include <MemoryBuffer.h>
 
 #include <algorithm>
-#include <vector>
 
 #include "FileTypes/StoreLinks.h"
 #include "Graphics/DeviceResources.h"
@@ -108,16 +107,23 @@ namespace fastlook::viewer
             {
                 return nullptr;
             }
-            UINT const stride = (w * bpp / 8 + 3) & ~3u;
-            std::vector<BYTE> pixels(static_cast<size_t>(stride) * h);
-            if (FAILED(transform->CopyPixels(nullptr, w, h, &format, WICBitmapTransformRotate0, stride, static_cast<UINT>(pixels.size()), pixels.data())))
+            // Decode straight into the bitmap's own buffer: one copy of the DCT-scaled pixels, not two.
+            com_ptr<IWICBitmap> bitmap;
+            if (FAILED(wic->CreateBitmap(w, h, format, WICBitmapCacheOnLoad, bitmap.put())))
             {
                 return nullptr;
             }
-            com_ptr<IWICBitmap> bitmap;
-            if (FAILED(wic->CreateBitmapFromMemory(w, h, format, stride, static_cast<UINT>(pixels.size()), pixels.data(), bitmap.put())))
             {
-                return nullptr;
+                com_ptr<IWICBitmapLock> lock;
+                WICRect const all{0, 0, static_cast<INT>(w), static_cast<INT>(h)};
+                UINT stride = 0, size = 0;
+                BYTE* data = nullptr;
+                if (FAILED(bitmap->Lock(&all, WICBitmapLockWrite, lock.put())) || FAILED(lock->GetStride(&stride)) ||
+                    FAILED(lock->GetDataPointer(&size, &data)) ||
+                    FAILED(transform->CopyPixels(nullptr, w, h, &format, WICBitmapTransformRotate0, stride, size, data)))
+                {
+                    return nullptr;
+                }
             }
             return bitmap.as<IWICBitmapSource>();
         }
@@ -175,11 +181,14 @@ namespace fastlook::viewer
 
         DecodedImage Decode(std::filesystem::path const& path, core::SizeU target, std::stop_token const& stop)
         {
-            auto* wic = DeviceResources::Get().Wic();
-            if (!wic)
+            // Own reference: DeviceResources::ReleaseAll (idle trim) may reset the shared factory during a long decode.
+            com_ptr<IWICImagingFactory2> wicRef;
+            wicRef.copy_from(DeviceResources::Get().Wic());
+            if (!wicRef)
             {
                 ThrowDecodeFailed();
             }
+            auto* wic = wicRef.get();
 
             com_ptr<IWICBitmapDecoder> decoder;
             HRESULT const hr = wic->CreateDecoderFromFilename(path.c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, decoder.put());
@@ -235,7 +244,10 @@ namespace fastlook::viewer
                 UINT capacity = 0;
                 check_hresult(reference.as<::Windows::Foundation::IMemoryBufferByteAccess>()->GetBuffer(&data, &capacity));
                 WICRect const rect{0, 0, static_cast<INT>(fitted.w), static_cast<INT>(fitted.h)};
-                check_hresult(source->CopyPixels(&rect, stride, capacity, data));
+                HRESULT const copied = source->CopyPixels(&rect, stride, capacity, data);
+                reference.Close();
+                buffer.Close();
+                check_hresult(copied);
             }
             result.bitmap = std::move(bitmap);
             return result;

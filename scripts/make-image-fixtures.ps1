@@ -122,6 +122,24 @@ foreach ($f in $frames) { $bw.Write($f.Png) }
 $bw.Flush()
 [IO.File]::WriteAllBytes((Join-Path $dir 'multi.ico'), $ms.ToArray())
 
+# orient-1..8.jpg: stored 400x300 quadrants TL red, TR green, BL blue, BR yellow, one file per EXIF orientation.
+# scripts/check-image-orientation.ps1 compares the Viewer's rendering with the EXIF table.
+$quad = Render 400 300 {
+    param($dc)
+    $dc.DrawRectangle((New-Brush '#FF0000'), $null, [Windows.Rect]::new(0, 0, 200, 150))
+    $dc.DrawRectangle((New-Brush '#00FF00'), $null, [Windows.Rect]::new(200, 0, 200, 150))
+    $dc.DrawRectangle((New-Brush '#0000FF'), $null, [Windows.Rect]::new(0, 150, 200, 150))
+    $dc.DrawRectangle((New-Brush '#FFFF00'), $null, [Windows.Rect]::new(200, 150, 200, 150))
+}
+foreach ($o in 1..8) {
+    $m = [Windows.Media.Imaging.BitmapMetadata]::new('jpg')
+    $m.SetQuery('/app1/ifd/{ushort=274}', [uint16]$o)
+    $e = [Windows.Media.Imaging.JpegBitmapEncoder]::new()
+    $e.QualityLevel = 95
+    $e.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($quad, $null, $m, $null))
+    $fs = [IO.File]::Create((Join-Path $dir "orient-$o.jpg")); $e.Save($fs); $fs.Dispose()
+}
+
 # bogus.heic: 64 random bytes (not a valid image).
 $rng = [Random]::new(1234); $junk = [byte[]]::new(64); $rng.NextBytes($junk)
 [IO.File]::WriteAllBytes((Join-Path $dir 'bogus.heic'), $junk)
