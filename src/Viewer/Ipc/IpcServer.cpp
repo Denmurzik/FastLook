@@ -11,6 +11,7 @@
 
 #include "Diagnostics/Log.h"
 #include "Ipc/Pipe.h"
+#include "Text/Utf.h"
 
 namespace fastlook::viewer
 {
@@ -79,6 +80,16 @@ namespace fastlook::viewer
             try
             {
                 reply = handler(request);
+            }
+            catch (winrt::hresult_error const& e)
+            {
+                FL_LOG_INFO(L"IPC request handler failed: {}", std::wstring(e.message()));
+                return;
+            }
+            catch (std::exception const& e)
+            {
+                FL_LOG_INFO(L"IPC request handler failed: {}", core::FromUtf8(e.what()));
+                return;
             }
             catch (...)
             {

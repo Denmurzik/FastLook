@@ -11,6 +11,11 @@ namespace fastlook::viewer
         {
             return false;
         }
+        if (SetForegroundWindow(hwnd))
+        {
+            return true;
+        }
+        // Refused: no recent input in this process. The tagged dummy key press (ignored by the hook) grants the right.
         INPUT inputs[2]{};
         inputs[0].type = INPUT_KEYBOARD;
         inputs[0].ki.wVk = 0xE8;

@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Modes/Modes.h"
 
+#include <algorithm>
 #include <memory>
 #include <optional>
 #include <thread>
@@ -144,16 +145,20 @@ namespace fastlook::viewer
                 {
                 case MsgType::Show:
                     StallOnce();
-                    host.Show(request.show);
-                    ForegroundPreview();
+                    {
+                        // A hidden->visible show is brought to the front by PreviewSession; only a re-show of the visible
+                        // preview needs it here.
+                        bool const wasVisible = host.IsPreviewVisible();
+                        host.Show(request.show);
+                        if (wasVisible)
+                        {
+                            ForegroundPreview();
+                        }
+                    }
                     reply.shown = true;
                     return reply;
                 case MsgType::Toggle:
-                    reply.shown = host.Toggle(request.show);
-                    if (reply.shown)
-                    {
-                        ForegroundPreview();
-                    }
+                    reply.shown = host.Toggle(request.show); // a toggle only ever shows from hidden: PreviewSession owns the focus
                     return reply;
                 case MsgType::Items:
                     host.UpdateItems(request.items);
@@ -192,7 +197,12 @@ namespace fastlook::viewer
 
         // The mutex lives as long as the process; the OS releases it on exit.
         HANDLE const instance = CreateMutexW(nullptr, FALSE, kInstanceMutex);
-        if (instance == nullptr || GetLastError() == ERROR_ALREADY_EXISTS)
+        if (instance == nullptr)
+        {
+            FL_LOG_INFO(L"Creating the instance mutex failed, error {}", GetLastError());
+            ExitProcess(3);
+        }
+        if (GetLastError() == ERROR_ALREADY_EXISTS)
         {
             FL_LOG_INFO(L"Another Viewer server is running");
             ExitProcess(2);
@@ -220,15 +230,19 @@ namespace fastlook::viewer
             server->Raise(open ? core::ViewerEvent::SettingsOpened : core::ViewerEvent::SettingsClosed);
         };
         callbacks.pinnedCountChanged = [server](int count) {
+            // Lifecycle counts single opens/closes: replay the whole difference so it always equals `count`.
             int const previous = std::exchange(server->pinned, count);
-            if (count > previous)
+            for (int i = previous; i < count; ++i)
             {
                 server->Raise(core::ViewerEvent::PinnedOpened);
-                server->ipc->SendEvent("pinned");
             }
-            else if (count < previous)
+            for (int i = previous; i > std::max(count, 0); --i)
             {
                 server->Raise(core::ViewerEvent::PinnedClosed);
+            }
+            if (count > previous)
+            {
+                server->ipc->SendEvent("pinned");
             }
         };
         callbacks.settingsSaved = [server] {

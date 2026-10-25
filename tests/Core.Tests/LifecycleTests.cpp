@@ -108,3 +108,20 @@ TEST(Lifecycle, ExitWhenQuiet)
     EXPECT_FALSE(l.On(ViewerEvent::Tick, 100).exitNow);
     EXPECT_TRUE(l.On(ViewerEvent::PreviewHidden, 200).exitNow);
 }
+
+TEST(Lifecycle, PinnedJumpsBlockUntilEveryWindowClosed)
+{
+    Lifecycle l(1000, 0);
+    l.On(ViewerEvent::PrewarmDone, 0);
+    // 0 -> 2 in one step, then 2 -> 0 in one step (the host replays a count change as that many events).
+    l.On(ViewerEvent::PinnedOpened, 10);
+    l.On(ViewerEvent::PinnedOpened, 10);
+    auto a = l.On(ViewerEvent::Tick, 9000);
+    EXPECT_FALSE(a.trimNow);
+    EXPECT_FALSE(a.exitNow);
+    EXPECT_FALSE(l.On(ViewerEvent::PinnedClosed, 9000).exitNow);
+    EXPECT_FALSE(l.On(ViewerEvent::Tick, 20000).exitNow);
+    l.On(ViewerEvent::PinnedClosed, 20000);
+    EXPECT_FALSE(l.On(ViewerEvent::Tick, 20999).exitNow);
+    EXPECT_TRUE(l.On(ViewerEvent::Tick, 21000).exitNow);
+}
