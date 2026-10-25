@@ -8,6 +8,8 @@
 #include "PreviewSession.h"
 #include "PreviewWindow.xaml.h"
 #include "SettingsLauncher.h"
+#include "Ui/KeyMap.h"
+#include "Ui/Placement.h"
 #include "WindowActions.h"
 
 namespace fastlook::viewer
@@ -57,7 +59,17 @@ namespace fastlook::viewer
         {
             theme = ElementTheme::Dark;
         }
-        winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(m_window)->SetTheme(theme);
+        auto* window = winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(m_window);
+        window->SetTheme(theme);
+        window->ApplyCaptionColors(Dark());
+    }
+
+    void ViewerHost::RefreshChrome()
+    {
+        if (m_window && m_settings.general.theme == core::ThemePref::System)
+        {
+            winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(m_window)->ApplyCaptionColors(Dark());
+        }
     }
 
     bool ViewerHost::Dark() const
@@ -107,7 +119,10 @@ namespace fastlook::viewer
         if (!m_window)
         {
             m_window = winrt::make<winrt::FastLook::implementation::PreviewWindow>();
-            m_window.AppWindow().Closing([this](auto const&, winrt::Microsoft::UI::Windowing::AppWindowClosingEventArgs const& args) {
+            auto* impl = winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(m_window);
+            impl->SetCommandHandler([this](Command command) { Execute(command); });
+            impl->SetKeyHandler([this](uint32_t vk, bool ctrl, bool shift, bool alt) { return HandleKey(vk, ctrl, shift, alt); });
+            m_closingToken = m_window.AppWindow().Closing([this](auto const&, winrt::Microsoft::UI::Windowing::AppWindowClosingEventArgs const& args) {
                 if (!m_exiting)
                 {
                     // The close button hides the preview (or ends a one-shot process) instead of destroying the warm window.
@@ -214,22 +229,245 @@ namespace fastlook::viewer
         return m_session->ExecutePreviewerCommand(command);
     }
 
-    bool ViewerHost::HandleKey(uint32_t, bool, bool, bool)
+    namespace
     {
-        return false;
+        // The previewer's own key handling first, then the key map. True when the key was consumed.
+        bool DispatchKey(std::shared_ptr<IPreviewer> const& previewer, uint32_t vk, bool ctrl, bool shift, bool alt, bool pinned,
+                         std::function<void(Command)> const& execute)
+        {
+            if (auto* target = dynamic_cast<IKeyTarget*>(previewer.get()))
+            {
+                if (target->OnKey(static_cast<winrt::Windows::System::VirtualKey>(vk), ctrl, shift))
+                {
+                    return true;
+                }
+            }
+            if (auto const command = core::MapPreviewKey(vk, ctrl, shift, alt, pinned))
+            {
+                execute(*command);
+                return true;
+            }
+            return false;
+        }
+    }
+
+    // A preview that was pinned: its own window, the previewer that fills it and the item it shows.
+    struct ViewerHost::PinnedWindow
+    {
+        winrt::FastLook::PreviewWindow window{nullptr};
+        std::shared_ptr<IPreviewer> previewer;
+        PreviewItem item;
+        winrt::event_token closingToken{};
+        bool closed = false;
+    };
+
+    bool ViewerHost::HandleKey(uint32_t vk, bool ctrl, bool shift, bool alt)
+    {
+        if (!m_session)
+        {
+            return false;
+        }
+        return DispatchKey(m_session->AttachedPreviewer(), vk, ctrl, shift, alt, false, [this](Command command) { Execute(command); });
     }
 
     void ViewerHost::PinCurrent()
     {
+        if (!m_session || !m_window)
+        {
+            return;
+        }
+        auto view = m_session->DetachForPin();
+        if (!view)
+        {
+            if (!m_session->DeferPin())
+            {
+                FL_LOG_INFO(L"Pin ignored: nothing is shown");
+            }
+            return;
+        }
+
+        auto pinned = std::make_shared<PinnedWindow>();
+        pinned->window = std::exchange(m_window, nullptr);
+        pinned->previewer = std::move(view->previewer);
+        pinned->item = std::move(view->item);
+        pinned->window.AppWindow().Closing(std::exchange(m_closingToken, {}));
+
+        auto* impl = winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(pinned->window);
+        impl->SetPinned(true);
+        std::weak_ptr<PinnedWindow> const weak = pinned;
+        impl->SetCommandHandler([this, weak](Command command) {
+            if (auto strong = weak.lock())
+            {
+                ExecutePinned(strong, command);
+            }
+        });
+        impl->SetKeyHandler([this, weak](uint32_t vk, bool ctrl, bool shift, bool alt) {
+            auto strong = weak.lock();
+            return strong && DispatchKey(strong->previewer, vk, ctrl, shift, alt, true, [&](Command command) { ExecutePinned(strong, command); });
+        });
+        pinned->closingToken = pinned->window.AppWindow().Closing(
+            [this, weak](auto const&, winrt::Microsoft::UI::Windowing::AppWindowClosingEventArgs const&) {
+                if (auto strong = weak.lock())
+                {
+                    OnPinnedClosing(strong);
+                }
+            });
+        m_pinned.push_back(pinned);
+
+        int const count = PinnedCount();
+        core::perf::Mark("pinned", "count=" + std::to_string(count));
+        FL_LOG_INFO(L"pinned count={}", count);
+        if (m_callbacks.pinnedCountChanged)
+        {
+            m_callbacks.pinnedCountChanged(count);
+        }
+        if (m_callbacks.previewHidden)
+        {
+            m_callbacks.previewHidden();
+        }
+
+        // The next preview shows in a fresh warm window.
+        try
+        {
+            PrewarmWindow(false);
+        }
+        catch (...)
+        {
+            FL_LOG_INFO(L"Warming the window after a pin failed");
+        }
+    }
+
+    void ViewerHost::ExecutePinned(std::shared_ptr<PinnedWindow> const& pinned, Command command)
+    {
+        HWND const hwnd = winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(pinned->window)->Hwnd();
+        switch (command)
+        {
+        case Command::Close:
+            // Through WM_CLOSE: Window.Close() would skip AppWindow.Closing, which is where a pinned window is released.
+            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+            break;
+        case Command::ZoomIn:
+        case Command::ZoomOut:
+        case Command::ZoomReset:
+            if (auto* zoomable = dynamic_cast<IZoomable*>(pinned->previewer.get()))
+            {
+                zoomable->Zoom(command == Command::ZoomIn ? ZoomCommand::In : command == Command::ZoomOut ? ZoomCommand::Out : ZoomCommand::Reset);
+            }
+            break;
+        case Command::OpenDefault:
+            actions::OpenDefault(pinned->item);
+            break;
+        case Command::OpenWith:
+            actions::OpenWith(hwnd, pinned->item);
+            break;
+        case Command::Reveal:
+            actions::Reveal(pinned->item);
+            break;
+        case Command::Copy:
+            actions::CopyFile(hwnd, pinned->item);
+            break;
+        case Command::Next:
+        case Command::Prev:
+        case Command::Pin:
+        case Command::ToggleFullscreen:
+            break; // a pinned window shows one fixed item
+        }
+    }
+
+    void ViewerHost::OnPinnedClosing(std::shared_ptr<PinnedWindow> const& pinned)
+    {
+        if (pinned->closed)
+        {
+            return;
+        }
+        pinned->closed = true;
+        try
+        {
+            pinned->previewer->Unload();
+        }
+        catch (...)
+        {
+        }
+        // The window is still closing: its last reference goes a turn later.
+        m_ui.TryEnqueue([pinned] {});
+        if (auto const it = std::ranges::find(m_pinned, pinned); it != m_pinned.end())
+        {
+            m_pinned.erase(it);
+        }
+
+        if (m_exiting)
+        {
+            return;
+        }
+        int const count = PinnedCount();
+        core::perf::Mark("pinned", "count=" + std::to_string(count));
+        FL_LOG_INFO(L"pinned count={}", count);
+        if (m_callbacks.pinnedCountChanged)
+        {
+            m_callbacks.pinnedCountChanged(count);
+        }
+        if (m_behavior == CloseBehavior::ExitProcess && count == 0 && !IsPreviewVisible())
+        {
+            ExitApp();
+        }
     }
 
     void ViewerHost::PrewarmHidden()
     {
-        core::perf::Mark("prewarm_done", "fgChanged=0");
-        if (m_callbacks.prewarmDone)
+        PrewarmWindow(true);
+    }
+
+    void ViewerHost::PrewarmWindow(bool notify)
+    {
+        using winrt::Microsoft::UI::Xaml::Media::CompositionTarget;
+
+        HWND const foreground = GetForegroundWindow();
+        Window();
+        auto const window = m_window;
+        auto appWindow = window.AppWindow();
+        appWindow.MoveAndResize({-32000, -32000, static_cast<int32_t>(core::kMinWindowW), static_cast<int32_t>(core::kMinWindowH)});
+        appWindow.Show(false); // not activated: the foreground stays where it is
+
+        struct State
         {
-            m_callbacks.prewarmDone();
-        }
+            bool done = false;
+            winrt::event_token rendering{};
+            winrt::Microsoft::UI::Dispatching::DispatcherQueueTimer timer{nullptr};
+        };
+        auto state = std::make_shared<State>();
+        auto finish = [this, state, window, foreground, notify] {
+            if (std::exchange(state->done, true))
+            {
+                return;
+            }
+            if (state->rendering)
+            {
+                CompositionTarget::Rendering(state->rendering);
+            }
+            if (state->timer)
+            {
+                state->timer.Stop();
+                state->timer = nullptr; // drops the Tick handler that holds this state
+            }
+            // A show request that arrived meanwhile owns the window now.
+            if (m_window == window && !IsPreviewVisible())
+            {
+                window.AppWindow().Hide();
+            }
+            bool const changed = GetForegroundWindow() != foreground;
+            core::perf::Mark("prewarm_done", changed ? "fgChanged=1" : "fgChanged=0");
+            if (notify && m_callbacks.prewarmDone)
+            {
+                m_callbacks.prewarmDone();
+            }
+        };
+        state->rendering = CompositionTarget::Rendering([finish](auto const&, auto const&) { finish(); });
+        // An off-screen window may never render a frame: do not wait for one forever.
+        state->timer = m_ui.CreateTimer();
+        state->timer.Interval(std::chrono::milliseconds(800));
+        state->timer.IsRepeating(false);
+        state->timer.Tick([finish](auto const&, auto const&) { finish(); });
+        state->timer.Start();
     }
 
     void ViewerHost::OpenSettingsWindow(std::wstring_view page)

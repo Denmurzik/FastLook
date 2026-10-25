@@ -194,6 +194,7 @@ namespace fastlook::viewer
         m_monitorHint = payload.monitor;
         m_iconRect = payload.iconRect;
         ++m_hideSerial; // a hide still animating out is abandoned
+        m_pinPending = false;
         StartRequest(false);
     }
 
@@ -233,6 +234,10 @@ namespace fastlook::viewer
         m_index = index;
         m_navMode = payload.navMode;
         m_listComplete = true;
+        if (m_visible)
+        {
+            ViewerHost::Get().Window()->SetCounter(m_index, m_items.size());
+        }
     }
 
     void PreviewSession::Navigate(int delta)
@@ -307,13 +312,14 @@ namespace fastlook::viewer
         req->item.ref = req->ref;
         m_current = req;
 
-        window->SetTitleText(winrt::hstring{core::BaseName(req->ref.path)});
+        window->SetItem(req->ref.path, winrt::hstring{core::BaseName(req->ref.path)}, m_index, m_items.size());
 
         if (!m_visible)
         {
             // Decision 27: visible at once in the Loading state, sized by the file type; no waiting for classification.
             auto const monitor = ResolveMonitor(false);
             window->ShowLoading();
+            host.RefreshChrome();
             auto const rect = core::FitPreviewWindow(DefaultSizeFor(req->ref.path), false, monitor.work, monitor.scale);
             m_visible = true;
             window->AppWindow().IsShownInSwitchers(true);
@@ -656,6 +662,18 @@ namespace fastlook::viewer
             }
         }
 
+        try
+        {
+            if (auto* provider = dynamic_cast<IToolbarProvider*>(run->previewer.get()))
+            {
+                window->SetToolbar(provider->ToolbarItems());
+            }
+        }
+        catch (...)
+        {
+            FL_LOG_INFO(L"Collecting the toolbar failed");
+        }
+
         FitWindow(false);
 
         core::perf::Mark("content_ready", std::string{"kind="}.append(kindName));
@@ -673,6 +691,11 @@ namespace fastlook::viewer
         catch (...)
         {
             FL_LOG_INFO(L"A content-ready callback threw");
+        }
+
+        if (std::exchange(m_pinPending, false))
+        {
+            host.PinCurrent();
         }
     }
 
@@ -775,8 +798,37 @@ namespace fastlook::viewer
             return;
         }
         m_visible = false;
+        m_pinPending = false;
         CancelCurrent();
         HideAsync(++m_hideSerial);
+    }
+
+    std::optional<PreviewSession::PinnedView> PreviewSession::DetachForPin()
+    {
+        if (!m_visible || !m_attached || m_current)
+        {
+            return std::nullopt;
+        }
+        PinnedView view{m_attached->previewer, m_shownItem};
+        m_attached.reset();
+        m_visible = false;
+        ++m_hideSerial;
+        if (m_renderToken)
+        {
+            winrt::Microsoft::UI::Xaml::Media::CompositionTarget::Rendering(m_renderToken);
+            m_renderToken = {};
+        }
+        return view;
+    }
+
+    bool PreviewSession::DeferPin()
+    {
+        if (!m_visible || !m_current)
+        {
+            return false;
+        }
+        m_pinPending = true;
+        return true;
     }
 
     winrt::fire_and_forget PreviewSession::HideAsync(uint64_t serial)
@@ -840,7 +892,7 @@ namespace fastlook::viewer
             {
                 host.Callbacks().previewHidden();
             }
-            if (host.Behavior() == CloseBehavior::ExitProcess)
+            if (host.Behavior() == CloseBehavior::ExitProcess && host.PinnedCount() == 0)
             {
                 host.ExitApp();
             }

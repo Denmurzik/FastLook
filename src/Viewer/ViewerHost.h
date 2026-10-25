@@ -3,6 +3,7 @@
 #include <functional>
 #include <memory>
 #include <string_view>
+#include <vector>
 
 #include <winrt/FastLook.h>
 #include <winrt/Microsoft.UI.Dispatching.h>
@@ -64,12 +65,17 @@ namespace fastlook::viewer
         bool IsPreviewVisible() const;
         void Execute(Command command);
         bool ExecutePreviewerCommand(std::wstring_view command);
-        // IKeyTarget first, then the key map, then Execute. Stub until the chrome task.
+        // The current previewer's IKeyTarget first, then the key map, then Execute. True when the key was consumed.
         bool HandleKey(uint32_t vk, bool ctrl, bool shift, bool alt);
-        void PinCurrent(); // stub until the chrome task
-        void PrewarmHidden(); // stub until the chrome task: only reports prewarm_done
+        // Moves the shown preview into its own window (min/max, switchers) and warms a fresh hidden window.
+        void PinCurrent();
+        // Shows the window off-screen without activating it until its first frame, then hides it (decision 26).
+        void PrewarmHidden();
+        int PinnedCount() const { return static_cast<int>(m_pinned.size()); }
 
         void OpenSettingsWindow(std::wstring_view page);
+        // Re-resolves the caption-button colours when the theme follows the system.
+        void RefreshChrome();
 
         winrt::FastLook::PreviewWindow CurrentWindow() const { return m_window; }
 
@@ -87,7 +93,13 @@ namespace fastlook::viewer
         void ExitApp();
 
     private:
+        struct PinnedWindow;
+
         ViewerHost() = default;
+
+        void PrewarmWindow(bool notify);
+        void ExecutePinned(std::shared_ptr<PinnedWindow> const& pinned, Command command);
+        void OnPinnedClosing(std::shared_ptr<PinnedWindow> const& pinned);
 
         void ApplySettings();
         void ApplyTheme();
@@ -101,6 +113,8 @@ namespace fastlook::viewer
         winrt::Microsoft::UI::Dispatching::DispatcherQueue m_ui{nullptr};
         winrt::FastLook::PreviewWindow m_window{nullptr};
         std::shared_ptr<PreviewSession> m_session;
+        winrt::event_token m_closingToken{};
+        std::vector<std::shared_ptr<PinnedWindow>> m_pinned;
         bool m_exiting = false;
     };
 }

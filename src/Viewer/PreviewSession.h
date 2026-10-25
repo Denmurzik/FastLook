@@ -41,6 +41,20 @@ namespace fastlook::viewer
         std::optional<PreviewItem> CurrentItem() const;
         HWND ExplorerHwnd() const { return m_explorer; }
 
+        // The previewer whose view is in the window (null while loading or after a failure).
+        std::shared_ptr<IPreviewer> AttachedPreviewer() const { return m_attached ? m_attached->previewer : nullptr; }
+
+        struct PinnedView
+        {
+            std::shared_ptr<IPreviewer> previewer;
+            PreviewItem item;
+        };
+        // Pinning: hands the attached previewer and its item over and leaves the session hidden, without animation and without
+        // unloading anything. Nullopt (and no change) when nothing is attached or a request is still in flight.
+        std::optional<PinnedView> DetachForPin();
+        // While a request is in flight: pins the item as soon as its content is attached. False when there is nothing to wait for.
+        bool DeferPin();
+
     private:
         struct Monitor
         {
@@ -104,6 +118,7 @@ namespace fastlook::viewer
         std::optional<core::RectI> m_iconRect;
 
         bool m_visible = false;
+        bool m_pinPending = false;
         uint64_t m_nextRequestId = 0;
         uint64_t m_hideSerial = 0;
         std::shared_ptr<Request> m_current;
