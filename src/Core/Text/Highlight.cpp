@@ -84,6 +84,14 @@ namespace fastlook::core
             {SCE_DIFF_POSITION, Number},       {SCE_DIFF_DELETED, Error},         {SCE_DIFF_ADDED, String},
             {SCE_DIFF_CHANGED, Keyword},       {SCE_DIFF_PATCH_ADD, String},      {SCE_DIFF_PATCH_DELETE, Error},
             {SCE_DIFF_REMOVED_PATCH_ADD, Error}, {SCE_DIFF_REMOVED_PATCH_DELETE, Error}};
+        constexpr StyleCategory kMarkdown[] = {
+            {SCE_MARKDOWN_HEADER1, Keyword},   {SCE_MARKDOWN_HEADER2, Keyword},   {SCE_MARKDOWN_HEADER3, Keyword},
+            {SCE_MARKDOWN_HEADER4, Keyword},   {SCE_MARKDOWN_HEADER5, Keyword},   {SCE_MARKDOWN_HEADER6, Keyword},
+            {SCE_MARKDOWN_STRONG1, Preprocessor}, {SCE_MARKDOWN_STRONG2, Preprocessor}, {SCE_MARKDOWN_EM1, Preprocessor},
+            {SCE_MARKDOWN_EM2, Preprocessor},  {SCE_MARKDOWN_BLOCKQUOTE, Comment}, {SCE_MARKDOWN_STRIKEOUT, Comment},
+            {SCE_MARKDOWN_ULIST_ITEM, Number}, {SCE_MARKDOWN_OLIST_ITEM, Number}, {SCE_MARKDOWN_HRULE, Number},
+            {SCE_MARKDOWN_LINK, Identifier},   {SCE_MARKDOWN_CODE, String},       {SCE_MARKDOWN_CODE2, String},
+            {SCE_MARKDOWN_CODEBK, String}};
         constexpr StyleCategory kCmake[] = {
             {SCE_CMAKE_COMMENT, Comment},       {SCE_CMAKE_STRINGDQ, String},      {SCE_CMAKE_STRINGLQ, String},
             {SCE_CMAKE_STRINGRQ, String},       {SCE_CMAKE_COMMANDS, Keyword},     {SCE_CMAKE_PARAMETERS, Identifier},
@@ -115,6 +123,7 @@ namespace fastlook::core
             else if (lexerName == "props") Fill(categories, kProps);
             else if (lexerName == "diff") Fill(categories, kDiff);
             else if (lexerName == "cmake") Fill(categories, kCmake);
+            else if (lexerName == "markdown") Fill(categories, kMarkdown);
         }
 
         struct LexerRelease

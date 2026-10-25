@@ -91,6 +91,16 @@ TEST(Highlight, JsonAndPowershellAndSql)
     EXPECT_EQ(AtOf(sql, "sql", "-- c"), TokenCategory::Comment);
 }
 
+TEST(Highlight, Markdown)
+{
+    std::string const md = "# Title\n\nSome **bold** text with `code`.\n\n> quote\n\n- item\n";
+    EXPECT_EQ(AtOf(md, "markdown", "# Title"), TokenCategory::Keyword);
+    EXPECT_EQ(AtOf(md, "markdown", "**bold**"), TokenCategory::Preprocessor);
+    EXPECT_EQ(AtOf(md, "markdown", "`code`"), TokenCategory::String);
+    EXPECT_EQ(AtOf(md, "markdown", "> quote"), TokenCategory::Comment);
+    EXPECT_EQ(AtOf(md, "markdown", "Some"), TokenCategory::Default);
+}
+
 TEST(Highlight, IncrementalMatchesWhole)
 {
     std::string text;
