@@ -17,6 +17,7 @@ Manual items that are not automated. Run on a clean Windows 11 22H2+ x64 machine
 - [ ] Every file in `tests/fixtures` previews correctly (images incl. all EXIF orientations, SVG, GIF, APNG, animated WebP, text encodings, Markdown, PDF, media, archives, unknown file).
 - [ ] Password-protected PDF and encrypted zip show the expected prompt/message.
 - [ ] Office preview with a real `.docx` (and `.xlsx`/`.pptx` if available) through the shell handler.
+- [ ] A rar, a cab and an iso file list their contents in the archive previewer.
 - [ ] Broken/corrupt media and bogus images show an error, not a crash.
 
 ## Window and actions

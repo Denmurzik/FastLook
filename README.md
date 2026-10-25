@@ -22,7 +22,7 @@ FastLook — нативный предпросмотр файлов по про�
 - **Markdown:** отрисовка с таблицами и локальными картинками, переключение на исходник.
 - **PDF:** постраничный просмотр, масштаб, PDF с паролем.
 - **Видео и аудио:** воспроизведение, автозапуск настраивается.
-- **Архивы:** zip, 7z, tar, gz и др. — список содержимого без распаковки.
+- **Архивы:** zip, 7z, rar, tar, gz, cab, iso и др. — список содержимого без распаковки.
 - **Документы Office и другие типы с обработчиками Проводника:** через предпросмотр оболочки Windows (если Office установлен).
 - **Папки и неизвестные файлы:** сведения о файле.
 - Действия: Открыть, Открыть с помощью, Показать в папке, Копировать, Закрепить окно (Pin).
@@ -33,10 +33,10 @@ Windows 11 22H2 или новее, x64.
 
 ### Установка
 
-- **Установщик** (`FastLook-<версия>-setup-x64.exe`) — установка для текущего пользователя, права администратора не нужны; можно включить автозапуск.
+- **Установщик** (`FastLook-Setup-<версия>.exe`) — установка для текущего пользователя, права администратора не нужны; можно включить автозапуск.
 - **Portable-архив** (`FastLook-<версия>-portable-x64.zip`) — распакуйте в любую папку и запустите `FastLook.exe`. Файл `portable.txt` в папке включает портативный режим: настройки и журнал хранятся рядом с программой.
 
-**SmartScreen.** Бинарные файлы не подписаны цифровой подписью, поэтому SmartScreen может показать предупреждение: нажмите «Подробнее» → «Выполнить в любом случае». Проверить целостность можно по файлу `.sha256`, лежащему рядом с загрузкой (`Get-FileHash <файл> -Algorithm SHA256`).
+**SmartScreen.** Бинарные файлы не подписаны цифровой подписью, поэтому SmartScreen может показать предупреждение: нажмите «Подробнее» → «Выполнить в любом случае». Проверить целостность можно по файлу `.sha256` (формат `<хеш>  <имя файла>`), лежащему рядом с загрузкой (`Get-FileHash <файл> -Algorithm SHA256`).
 
 **PowerToys Peek.** Peek тоже может реагировать на Пробел. Отключите его в PowerToys → Peek (или смените его сочетание); при обнаружении конфликта FastLook показывает предупреждение.
 
@@ -115,7 +115,7 @@ FastLook is a native Space-bar file previewer for Windows 11 in the spirit of ma
 - **Markdown:** rendered with tables and local images, switchable to source.
 - **PDF:** paged view, zoom, password-protected PDFs.
 - **Video and audio:** playback, autoplay is configurable.
-- **Archives:** zip, 7z, tar, gz and more — contents listed without extracting.
+- **Archives:** zip, 7z, rar, tar, gz, cab, iso and more — contents listed without extracting.
 - **Office documents and other types with Explorer preview handlers:** through the Windows shell preview (when Office is installed).
 - **Folders and unknown files:** file details.
 - Actions: Open, Open with, Show in folder, Copy, Pin.
@@ -126,10 +126,10 @@ Windows 11 22H2 or newer, x64.
 
 ### Install
 
-- **Installer** (`FastLook-<version>-setup-x64.exe`) — per-user install, no administrator rights; autostart can be enabled.
+- **Installer** (`FastLook-Setup-<version>.exe`) — per-user install, no administrator rights; autostart can be enabled.
 - **Portable zip** (`FastLook-<version>-portable-x64.zip`) — extract anywhere and run `FastLook.exe`. A `portable.txt` file next to the exe enables portable mode: settings and logs are kept beside the program.
 
-**SmartScreen.** The binaries are unsigned, so SmartScreen may show a warning: click "More info" → "Run anyway". Verify integrity with the `.sha256` file published next to the download (`Get-FileHash <file> -Algorithm SHA256`).
+**SmartScreen.** The binaries are unsigned, so SmartScreen may show a warning: click "More info" → "Run anyway". Verify integrity with the `.sha256` file (format `<hash>  <file name>`) published next to the download (`Get-FileHash <file> -Algorithm SHA256`).
 
 **PowerToys Peek.** Peek can also react to Space. Turn it off in PowerToys → Peek (or change its shortcut); FastLook shows a warning when it detects the conflict.
 

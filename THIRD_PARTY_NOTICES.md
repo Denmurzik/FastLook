@@ -18,7 +18,7 @@ Test-only: GoogleTest (BSD-3-Clause) is used by the unit tests and is not part o
 | lz4 | 1.10.0 | BSD-2-Clause (library) |
 | libwebp | 1.6.0 | BSD-3-Clause |
 | nlohmann/json | 3.12.0 | MIT |
-| Windows App SDK (self-contained runtime) | 2.3.x | Microsoft Software License Terms |
+| Windows App SDK (self-contained runtime) | Foundation 2.3.12, WinUI 2.3.9, InteractiveExperiences 2.1.9 | Microsoft Software License Terms |
 | C++/WinRT | 3.0.260818.1 | MIT |
 | Microsoft Visual C++ runtime (redistributable) | 14.x | Microsoft redistribution terms |
 
@@ -1188,7 +1188,7 @@ Language projection used at build time; its headers are compiled into the binari
 
 ## Microsoft Visual C++ runtime (redistributable)
 
-The portable zip and the installer ship the Microsoft Visual C++ runtime DLLs (`msvcp140*.dll`, `vcruntime140*.dll`) that the
-binaries import, redistributed under the Microsoft Visual Studio redistribution terms
+The portable zip and the installer ship the CRT DLLs the binaries import (`msvcp140*.dll`, `vcruntime140*.dll`),
+redistributed under the Microsoft Visual Studio redistribution terms
 (https://learn.microsoft.com/en-us/cpp/windows/determining-which-dlls-to-redistribute). Microsoft's licence terms for these
 files are part of the Visual Studio / Build Tools licence; they are not reproduced here.
