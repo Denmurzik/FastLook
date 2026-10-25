@@ -23,8 +23,8 @@ TEST(TextDocument, OpensFixturesWithRightEncoding)
     auto cp = OpenIndexed(FixturePath("text/cp1251.txt"));
     ASSERT_TRUE(cp);
     EXPECT_EQ(cp->Encoding().encoding, TextEncoding::Ansi);
-    EXPECT_EQ(cp->Encoding().codePage, GetACP());
-    if (GetACP() == 1251) EXPECT_EQ(cp->LineText(0), L"Привет");
+    EXPECT_NE(cp->Encoding().codePage, 65001u); // never UTF-8, also when the system uses "Beta: UTF-8 for worldwide language support"
+    if (cp->Encoding().codePage == 1251) EXPECT_EQ(cp->LineText(0), L"Привет");
 
     auto le = OpenIndexed(FixturePath("text/utf16le-bom.txt"));
     ASSERT_TRUE(le);

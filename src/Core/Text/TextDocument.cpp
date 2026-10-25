@@ -27,6 +27,20 @@ namespace fastlook::core
             return LR"(\\?\)" + s;
         }
 
+        // The code page of legacy "ANSI" files. With the "Beta: Use Unicode UTF-8 for worldwide language support" setting the
+        // process code page is UTF-8, which would turn every cp1251/cp1252 file into U+FFFD: use the system locale's own page.
+        uint32_t LegacyAnsiCodePage()
+        {
+            uint32_t const acp = GetACP();
+            if (acp != CP_UTF8) return acp;
+            DWORD page = 0;
+            if (GetLocaleInfoEx(LOCALE_NAME_SYSTEM_DEFAULT, LOCALE_IDEFAULTANSICODEPAGE | LOCALE_RETURN_NUMBER, reinterpret_cast<LPWSTR>(&page),
+                                sizeof(page) / sizeof(wchar_t)) != 0 &&
+                page != 0 && page != CP_UTF8)
+                return page;
+            return 1252;
+        }
+
         struct Handle
         {
             HANDLE h;
@@ -68,7 +82,7 @@ namespace fastlook::core
                 if (mapping != nullptr) CloseHandle(mapping);
                 return nullptr;
             }
-            encoding = DetectEncoding(head, GetACP(), raw.size() > kSniffBytes);
+            encoding = DetectEncoding(head, LegacyAnsiCodePage(), raw.size() > kSniffBytes);
         }
         return std::unique_ptr<TextDocument>(new TextDocument(mapping, view, raw, encoding));
     }
