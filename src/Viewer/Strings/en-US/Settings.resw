@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:element name="root" msdata:IsDataSet="true" />
+  </xsd:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="ActivationKey" xml:space="preserve">
+    <value>Activation key</value>
+  </data>
+  <data name="ActivationKeyDesc" xml:space="preserve">
+    <value>Press it with a file selected to open the preview</value>
+  </data>
+  <data name="AppName" xml:space="preserve">
+    <value>FastLook</value>
+  </data>
+  <data name="AppTagline" xml:space="preserve">
+    <value>Quick preview of files from Explorer</value>
+  </data>
+  <data name="Autoplay" xml:space="preserve">
+    <value>Autoplay media</value>
+  </data>
+  <data name="AutoplayDesc" xml:space="preserve">
+    <value>Start audio and video as soon as the preview opens</value>
+  </data>
+  <data name="AutostartFailed" xml:space="preserve">
+    <value>Couldn't change the startup entry</value>
+  </data>
+  <data name="CheckUpdates" xml:space="preserve">
+    <value>Check for updates</value>
+  </data>
+  <data name="CheckUpdatesDesc" xml:space="preserve">
+    <value>Contacts GitHub only when you press the button</value>
+  </data>
+  <data name="CodeFontSize" xml:space="preserve">
+    <value>Code font size</value>
+  </data>
+  <data name="CodeFontSizeDesc" xml:space="preserve">
+    <value>From 8 to 32 points</value>
+  </data>
+  <data name="Desktop" xml:space="preserve">
+    <value>Work on the desktop</value>
+  </data>
+  <data name="DesktopDesc" xml:space="preserve">
+    <value>Preview icons on the desktop as well as in Explorer</value>
+  </data>
+  <data name="GitHub" xml:space="preserve">
+    <value>GitHub repository</value>
+  </data>
+  <data name="Idle" xml:space="preserve">
+    <value>Unload from memory after idle</value>
+  </data>
+  <data name="IdleDesc" xml:space="preserve">
+    <value>FastLook starts again on the next preview</value>
+  </data>
+  <data name="IdleMinutes" xml:space="preserve">
+    <value>{0} min</value>
+  </data>
+  <data name="IdleNever" xml:space="preserve">
+    <value>Never</value>
+  </data>
+  <data name="KeyAltSpace" xml:space="preserve">
+    <value>Alt+Space</value>
+  </data>
+  <data name="KeyCtrlSpace" xml:space="preserve">
+    <value>Ctrl+Space</value>
+  </data>
+  <data name="KeyShiftSpace" xml:space="preserve">
+    <value>Shift+Space</value>
+  </data>
+  <data name="KeySpace" xml:space="preserve">
+    <value>Space</value>
+  </data>
+  <data name="Language" xml:space="preserve">
+    <value>Language</value>
+  </data>
+  <data name="LanguageDesc" xml:space="preserve">
+    <value>Language of the FastLook interface</value>
+  </data>
+  <data name="LanguageEnglish" xml:space="preserve">
+    <value>English</value>
+  </data>
+  <data name="LanguageRestart" xml:space="preserve">
+    <value>Restart FastLook to apply the language</value>
+  </data>
+  <data name="LanguageRussian" xml:space="preserve">
+    <value>Русский</value>
+  </data>
+  <data name="LanguageSystem" xml:space="preserve">
+    <value>Use system setting</value>
+  </data>
+  <data name="LaunchAtLogin" xml:space="preserve">
+    <value>Launch with Windows</value>
+  </data>
+  <data name="LaunchAtLoginDesc" xml:space="preserve">
+    <value>Start FastLook in the background when you sign in</value>
+  </data>
+  <data name="MarkdownRendered" xml:space="preserve">
+    <value>Rendered</value>
+  </data>
+  <data name="MarkdownSource" xml:space="preserve">
+    <value>Source</value>
+  </data>
+  <data name="MarkdownView" xml:space="preserve">
+    <value>Markdown by default</value>
+  </data>
+  <data name="MarkdownViewDesc" xml:space="preserve">
+    <value>How .md files open</value>
+  </data>
+  <data name="NavAbout" xml:space="preserve">
+    <value>About</value>
+  </data>
+  <data name="NavGeneral" xml:space="preserve">
+    <value>General</value>
+  </data>
+  <data name="NavPreview" xml:space="preserve">
+    <value>Preview</value>
+  </data>
+  <data name="Off" xml:space="preserve">
+    <value>Off</value>
+  </data>
+  <data name="On" xml:space="preserve">
+    <value>On</value>
+  </data>
+  <data name="OpenFailed" xml:space="preserve">
+    <value>Couldn't open it</value>
+  </data>
+  <data name="OpenLogs" xml:space="preserve">
+    <value>Open logs folder</value>
+  </data>
+  <data name="PeekDismiss" xml:space="preserve">
+    <value>Don't show again</value>
+  </data>
+  <data name="PeekWarning" xml:space="preserve">
+    <value>PowerToys Peek is turned on and uses {0} as well. Choose another activation key here or change it in PowerToys.</value>
+  </data>
+  <data name="Prewarm" xml:space="preserve">
+    <value>Preload when Explorer is activated</value>
+  </data>
+  <data name="PrewarmDesc" xml:space="preserve">
+    <value>Makes the first preview appear faster; uses a little memory</value>
+  </data>
+  <data name="SaveFailed" xml:space="preserve">
+    <value>Couldn't save the settings</value>
+  </data>
+  <data name="ShellHandlers" xml:space="preserve">
+    <value>Use system previewers</value>
+  </data>
+  <data name="ShellHandlersDesc" xml:space="preserve">
+    <value>For Office documents and other types FastLook doesn't render itself</value>
+  </data>
+  <data name="Theme" xml:space="preserve">
+    <value>Theme</value>
+  </data>
+  <data name="ThemeDark" xml:space="preserve">
+    <value>Dark</value>
+  </data>
+  <data name="ThemeDesc" xml:space="preserve">
+    <value>Appearance of the preview and settings windows</value>
+  </data>
+  <data name="ThemeLight" xml:space="preserve">
+    <value>Light</value>
+  </data>
+  <data name="ThemeSystem" xml:space="preserve">
+    <value>Use system setting</value>
+  </data>
+  <data name="ThirdParty" xml:space="preserve">
+    <value>Third-party licenses</value>
+  </data>
+  <data name="UpdateDialogClose" xml:space="preserve">
+    <value>OK</value>
+  </data>
+  <data name="UpdateNotImplemented" xml:space="preserve">
+    <value>Update checking is not available yet.</value>
+  </data>
+  <data name="VersionLabel" xml:space="preserve">
+    <value>Version {0}</value>
+  </data>
+  <data name="WindowTitle" xml:space="preserve">
+    <value>FastLook Settings</value>
+  </data>
+  <data name="WordWrap" xml:space="preserve">
+    <value>Word wrap by default</value>
+  </data>
+  <data name="WordWrapDesc" xml:space="preserve">
+    <value>For text, code and Markdown source</value>
+  </data>
+</root>

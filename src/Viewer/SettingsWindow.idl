@@ -1,0 +1,9 @@
+namespace FastLook
+{
+    // The settings window: a NavigationView over the General, Preview and About pages.
+    [default_interface]
+    runtimeclass SettingsWindow : Microsoft.UI.Xaml.Window
+    {
+        SettingsWindow();
+    }
+}

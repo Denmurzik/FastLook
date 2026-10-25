@@ -1,15 +1,16 @@
 #include "pch.h"
 #include "Modes/Modes.h"
 
-#include "Diagnostics/Log.h"
+#include "SettingsLauncher.h"
+#include "System/AppPaths.h"
 #include "ViewerHost.h"
 
 namespace fastlook::viewer
 {
-    // Stub: replaced by the settings window task.
-    void RunSettingsMode(core::ViewerArgs const&)
+    void RunSettingsMode(core::ViewerArgs const& args)
     {
-        FL_LOG_INFO(L"Settings mode: not implemented");
-        ViewerHost::Get().ExitApp();
+        auto& host = ViewerHost::Get();
+        host.Initialize(core::CurrentAppPaths(), CloseBehavior::ExitProcess, args);
+        ShowSettingsWindow(args.settingsPage, [] { ViewerHost::Get().ExitApp(); });
     }
 }

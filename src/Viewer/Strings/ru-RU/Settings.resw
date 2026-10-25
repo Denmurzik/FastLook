@@ -1,0 +1,198 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:element name="root" msdata:IsDataSet="true" />
+  </xsd:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="ActivationKey" xml:space="preserve">
+    <value>Клавиша вызова</value>
+  </data>
+  <data name="ActivationKeyDesc" xml:space="preserve">
+    <value>Нажмите её при выбранном файле, чтобы открыть просмотр</value>
+  </data>
+  <data name="AppName" xml:space="preserve">
+    <value>FastLook</value>
+  </data>
+  <data name="AppTagline" xml:space="preserve">
+    <value>Быстрый просмотр файлов из Проводника</value>
+  </data>
+  <data name="Autoplay" xml:space="preserve">
+    <value>Автоматически воспроизводить медиа</value>
+  </data>
+  <data name="AutoplayDesc" xml:space="preserve">
+    <value>Запускать звук и видео сразу при открытии просмотра</value>
+  </data>
+  <data name="AutostartFailed" xml:space="preserve">
+    <value>Не удалось изменить запись автозапуска</value>
+  </data>
+  <data name="CheckUpdates" xml:space="preserve">
+    <value>Проверить обновления</value>
+  </data>
+  <data name="CheckUpdatesDesc" xml:space="preserve">
+    <value>Обращается к GitHub только по нажатию кнопки</value>
+  </data>
+  <data name="CodeFontSize" xml:space="preserve">
+    <value>Размер шрифта кода</value>
+  </data>
+  <data name="CodeFontSizeDesc" xml:space="preserve">
+    <value>От 8 до 32 пунктов</value>
+  </data>
+  <data name="Desktop" xml:space="preserve">
+    <value>Работать на рабочем столе</value>
+  </data>
+  <data name="DesktopDesc" xml:space="preserve">
+    <value>Просматривать значки на рабочем столе, как и в Проводнике</value>
+  </data>
+  <data name="GitHub" xml:space="preserve">
+    <value>Репозиторий на GitHub</value>
+  </data>
+  <data name="Idle" xml:space="preserve">
+    <value>Выгружать из памяти при простое</value>
+  </data>
+  <data name="IdleDesc" xml:space="preserve">
+    <value>FastLook запустится снова при следующем просмотре</value>
+  </data>
+  <data name="IdleMinutes" xml:space="preserve">
+    <value>{0} мин</value>
+  </data>
+  <data name="IdleNever" xml:space="preserve">
+    <value>Никогда</value>
+  </data>
+  <data name="KeyAltSpace" xml:space="preserve">
+    <value>Alt+Пробел</value>
+  </data>
+  <data name="KeyCtrlSpace" xml:space="preserve">
+    <value>Ctrl+Пробел</value>
+  </data>
+  <data name="KeyShiftSpace" xml:space="preserve">
+    <value>Shift+Пробел</value>
+  </data>
+  <data name="KeySpace" xml:space="preserve">
+    <value>Пробел</value>
+  </data>
+  <data name="Language" xml:space="preserve">
+    <value>Язык</value>
+  </data>
+  <data name="LanguageDesc" xml:space="preserve">
+    <value>Язык интерфейса FastLook</value>
+  </data>
+  <data name="LanguageEnglish" xml:space="preserve">
+    <value>English</value>
+  </data>
+  <data name="LanguageRestart" xml:space="preserve">
+    <value>Перезапустите FastLook, чтобы сменить язык</value>
+  </data>
+  <data name="LanguageRussian" xml:space="preserve">
+    <value>Русский</value>
+  </data>
+  <data name="LanguageSystem" xml:space="preserve">
+    <value>Как в системе</value>
+  </data>
+  <data name="LaunchAtLogin" xml:space="preserve">
+    <value>Запускать вместе с Windows</value>
+  </data>
+  <data name="LaunchAtLoginDesc" xml:space="preserve">
+    <value>Запускать FastLook в фоне при входе в систему</value>
+  </data>
+  <data name="MarkdownRendered" xml:space="preserve">
+    <value>Оформленный вид</value>
+  </data>
+  <data name="MarkdownSource" xml:space="preserve">
+    <value>Исходный текст</value>
+  </data>
+  <data name="MarkdownView" xml:space="preserve">
+    <value>Markdown по умолчанию</value>
+  </data>
+  <data name="MarkdownViewDesc" xml:space="preserve">
+    <value>Как открываются файлы .md</value>
+  </data>
+  <data name="NavAbout" xml:space="preserve">
+    <value>О программе</value>
+  </data>
+  <data name="NavGeneral" xml:space="preserve">
+    <value>Основные</value>
+  </data>
+  <data name="NavPreview" xml:space="preserve">
+    <value>Просмотр</value>
+  </data>
+  <data name="Off" xml:space="preserve">
+    <value>Откл.</value>
+  </data>
+  <data name="On" xml:space="preserve">
+    <value>Вкл.</value>
+  </data>
+  <data name="OpenFailed" xml:space="preserve">
+    <value>Не удалось открыть</value>
+  </data>
+  <data name="OpenLogs" xml:space="preserve">
+    <value>Открыть папку журналов</value>
+  </data>
+  <data name="PeekDismiss" xml:space="preserve">
+    <value>Больше не показывать</value>
+  </data>
+  <data name="PeekWarning" xml:space="preserve">
+    <value>PowerToys Peek включён и тоже использует {0}. Выберите здесь другую клавишу вызова или измените её в PowerToys.</value>
+  </data>
+  <data name="Prewarm" xml:space="preserve">
+    <value>Заранее загружать при активации Проводника</value>
+  </data>
+  <data name="PrewarmDesc" xml:space="preserve">
+    <value>Ускоряет первый просмотр; занимает немного памяти</value>
+  </data>
+  <data name="SaveFailed" xml:space="preserve">
+    <value>Не удалось сохранить настройки</value>
+  </data>
+  <data name="ShellHandlers" xml:space="preserve">
+    <value>Использовать системные средства просмотра</value>
+  </data>
+  <data name="ShellHandlersDesc" xml:space="preserve">
+    <value>Для документов Office и других типов, которые FastLook не отображает сам</value>
+  </data>
+  <data name="Theme" xml:space="preserve">
+    <value>Тема</value>
+  </data>
+  <data name="ThemeDark" xml:space="preserve">
+    <value>Тёмная</value>
+  </data>
+  <data name="ThemeDesc" xml:space="preserve">
+    <value>Оформление окон просмотра и настроек</value>
+  </data>
+  <data name="ThemeLight" xml:space="preserve">
+    <value>Светлая</value>
+  </data>
+  <data name="ThemeSystem" xml:space="preserve">
+    <value>Как в системе</value>
+  </data>
+  <data name="ThirdParty" xml:space="preserve">
+    <value>Лицензии сторонних компонентов</value>
+  </data>
+  <data name="UpdateDialogClose" xml:space="preserve">
+    <value>OK</value>
+  </data>
+  <data name="UpdateNotImplemented" xml:space="preserve">
+    <value>Проверка обновлений пока недоступна.</value>
+  </data>
+  <data name="VersionLabel" xml:space="preserve">
+    <value>Версия {0}</value>
+  </data>
+  <data name="WindowTitle" xml:space="preserve">
+    <value>Настройки FastLook</value>
+  </data>
+  <data name="WordWrap" xml:space="preserve">
+    <value>Переносить строки по умолчанию</value>
+  </data>
+  <data name="WordWrapDesc" xml:space="preserve">
+    <value>Для текста, кода и исходника Markdown</value>
+  </data>
+</root>

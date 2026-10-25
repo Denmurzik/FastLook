@@ -1,0 +1,8 @@
+namespace FastLook
+{
+    [default_interface]
+    runtimeclass SettingsPreviewPage : Microsoft.UI.Xaml.Controls.Page
+    {
+        SettingsPreviewPage();
+    }
+}

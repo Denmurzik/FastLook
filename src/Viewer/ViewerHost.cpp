@@ -185,6 +185,7 @@ namespace fastlook::viewer
         {
             close(pinned->window);
         }
+        CloseSettingsWindow();
     }
 
     void ViewerHost::Show(core::ipc::ShowPayload const& payload)
