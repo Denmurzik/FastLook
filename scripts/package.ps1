@@ -16,7 +16,7 @@
 param(
     [ValidateSet('Release', 'Debug')]
     [string]$Configuration = 'Release',
-    # x.y.z; defaults to FASTLOOK_VERSION_STR in src/Common/Version.h.
+    # x.y.z; defaults to FASTLOOK_VERSION_STR in src/Common/Version.h. When given it must equal Version.h (check-iss enforces it).
     [string]$Version,
     [switch]$NoBuild,
     [switch]$SkipInstaller,
@@ -155,7 +155,9 @@ Write-Host ("Portable zip: {0} ({1:N1} MB)" -f $zip, ((Get-Item $zip).Length / 1
 
 # --- Installer ------------------------------------------------------------------------------------------------------------
 $iss = Join-Path $repo 'installer\FastLook.iss'
-& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'check-iss.ps1') -Iss $iss -StageDir $stage -Version $Version | Select-Object -Last 1
+# check-iss compares -Version with Version.h, so it is passed only when given explicitly (it must equal Version.h; CI passes that value).
+$checkArgs = if ($PSBoundParameters.ContainsKey('Version')) { @('-Version', $Version) } else { @() }
+& pwsh -NoProfile -File (Join-Path $PSScriptRoot 'check-iss.ps1') -Iss $iss -StageDir $stage @checkArgs | Select-Object -Last 1
 if ($LASTEXITCODE -ne 0) { throw 'check-iss.ps1 failed' }
 
 if ($SkipInstaller) {

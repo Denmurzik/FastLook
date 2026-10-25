@@ -72,11 +72,21 @@ const
   RunKey = 'Software\Microsoft\Windows\CurrentVersion\Run';
   UninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{6F1C2A9E-3B4D-4E8F-A1C7-5D2E9B0F4A63}_is1';
 
+var
+  IsUpgrade: Boolean;
+
+// Decided once at start, before Inno writes this run's own uninstall key.
+function InitializeSetup(): Boolean;
+begin
+  IsUpgrade := RegKeyExists(HKEY_CURRENT_USER, UninstallKey);
+  Result := True;
+end;
+
 // Fresh install (or interactive upgrade): honour the autostart task. Silent upgrade (the updater): keep the user's current state,
 // i.e. never re-create a Run value that was removed in Settings.
 function ShouldWriteAutostart: Boolean;
 begin
-  if WizardSilent and RegKeyExists(HKEY_CURRENT_USER, UninstallKey) then
+  if WizardSilent and IsUpgrade then
     Result := RegValueExists(HKEY_CURRENT_USER, RunKey, 'FastLook')
   else
     Result := True;
@@ -126,8 +136,9 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
+  // The Retry/Cancel dialog already explained the problem; Cancel aborts Setup silently (no second error box).
   if not StopFastLook(ExpandConstant('{app}'), WizardSilent) then
-    Result := CustomMessage('StillRunning');
+    Abort;
 end;
 
 function InitializeUninstall(): Boolean;

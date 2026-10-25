@@ -79,7 +79,7 @@ Check 'prompt skipped when silent' ($text.Contains('if not UninstallSilent then'
 Check 'RegDeleteValue Run\FastLook (also when silent)' (
     $text.Contains("RegDeleteValue(HKEY_CURRENT_USER, RunKey, 'FastLook')") -and $text.Contains("RunKey = '$runKey'"))
 Check 'silent upgrade keeps autostart state (Check: ShouldWriteAutostart)' (
-    $text.Contains('function ShouldWriteAutostart') -and $text.Contains('WizardSilent and RegKeyExists') -and $text.Contains("RegValueExists(HKEY_CURRENT_USER, RunKey, 'FastLook')"))
+    $text.Contains('function ShouldWriteAutostart') -and $text.Contains('WizardSilent and IsUpgrade') -and $text.Contains('IsUpgrade := RegKeyExists(HKEY_CURRENT_USER, UninstallKey)') -and $text.Contains("RegValueExists(HKEY_CURRENT_USER, RunKey, 'FastLook')"))
 Check 'shutdown: one retry, silent taskkill fallback, interactive Retry' (
     $text.Contains('TryShutdown(Exe) = 0) or (TryShutdown(Exe) = 0)') -and $text.Contains('taskkill.exe') -and $text.Contains('MB_RETRYCANCEL'))
 Check '[InstallDelete] removes stale runtime files' ($text -match '(?m)^\[InstallDelete\]' -and $text.Contains('Name: "{app}\*.dll"'))
