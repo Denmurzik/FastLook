@@ -180,12 +180,6 @@
   <data name="ThirdParty" xml:space="preserve">
     <value>Third-party licenses</value>
   </data>
-  <data name="UpdateDialogClose" xml:space="preserve">
-    <value>OK</value>
-  </data>
-  <data name="UpdateNotImplemented" xml:space="preserve">
-    <value>Update checking is not available yet.</value>
-  </data>
   <data name="VersionLabel" xml:space="preserve">
     <value>Version {0}</value>
   </data>

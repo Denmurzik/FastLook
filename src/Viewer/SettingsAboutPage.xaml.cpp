@@ -46,10 +46,19 @@ namespace
         }
     }
 
+    bool EnvFlagSet(wchar_t const* name)
+    {
+        wchar_t value[2]{};
+        return GetEnvironmentVariableW(name, value, 2) == 1 && value[0] == L'1';
+    }
+
     // Parameters are by value: they are used after the first co_await.
     fire_and_forget CheckUpdates(Button button, XamlRoot root)
     {
-        button.IsEnabled(false);
+        if (button)
+        {
+            button.IsEnabled(false);
+        }
         try
         {
             co_await fastlook::viewer::CheckForUpdatesInteractive(root);
@@ -58,7 +67,10 @@ namespace
         {
             FL_LOG_INFO(L"Update check from settings failed");
         }
-        button.IsEnabled(true);
+        if (button)
+        {
+            button.IsEnabled(true);
+        }
     }
 
     Button MakeButton(hstring const& text)
@@ -107,6 +119,21 @@ namespace winrt::FastLook::implementation
             CheckUpdates(button, button.XamlRoot());
         });
         rows.Append(MakeSettingsRow(Str(L"Settings", L"CheckUpdates"), Str(L"Settings", L"CheckUpdatesDesc"), check));
+
+        // Test hook for UI verification: FASTLOOK_UPDATE_AUTOCHECK=1 runs the update check once when the page is shown.
+        // The handler takes the page from its sender argument instead of capturing it.
+        if (EnvFlagSet(L"FASTLOOK_UPDATE_AUTOCHECK"))
+        {
+            Loaded([](auto const& sender, auto const&) {
+                static bool started = false;
+                auto const element = sender.template as<FrameworkElement>();
+                if (!started && element.XamlRoot())
+                {
+                    started = true;
+                    CheckUpdates(Button{}, element.XamlRoot());
+                }
+            });
+        }
 
         HyperlinkButton link;
         link.Content(box_value(hstring{kRepositoryUrl}));

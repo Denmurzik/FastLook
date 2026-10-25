@@ -180,12 +180,6 @@
   <data name="ThirdParty" xml:space="preserve">
     <value>Лицензии сторонних компонентов</value>
   </data>
-  <data name="UpdateDialogClose" xml:space="preserve">
-    <value>OK</value>
-  </data>
-  <data name="UpdateNotImplemented" xml:space="preserve">
-    <value>Проверка обновлений пока недоступна.</value>
-  </data>
   <data name="VersionLabel" xml:space="preserve">
     <value>Версия {0}</value>
   </data>
