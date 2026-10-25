@@ -1,0 +1,12 @@
+{
+  "name": "fastlook",
+  "builtin-baseline": "817892b0ecbc6af994dd6df999c73faf795adbf2",
+  "dependencies": [
+    "lexilla",
+    "md4c",
+    { "name": "libarchive", "default-features": false, "features": ["bzip2", "lz4", "lzma", "zstd"] },
+    "libwebp",
+    "nlohmann-json",
+    "gtest"
+  ]
+}

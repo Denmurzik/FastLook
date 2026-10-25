@@ -6,5 +6,19 @@
     <IntDir>$(RepoRoot)out\obj\$(MSBuildProjectName)\$(Configuration)\</IntDir>
     <!-- Defined here (not left to the VC targets) so C++/WinRT's XamlMetaDataProvider.{idl,cpp} defaults land in obj, not the source tree -->
     <GeneratedFilesDir>$(IntDir)Generated Files\</GeneratedFilesDir>
+
+    <!-- VS 2022 (17.x) builds with v143, anything newer with v145; override with /p:FastLookToolset=v14x -->
+    <FastLookToolset Condition="'$(FastLookToolset)'=='' and '$(VisualStudioVersion)'=='17.0'">v143</FastLookToolset>
+    <FastLookToolset Condition="'$(FastLookToolset)'==''">v145</FastLookToolset>
+
+    <!-- vcpkg: manifest mode; the install itself is run by scripts/build.ps1 -->
+    <VcpkgRoot Condition="'$(VcpkgRoot)'=='' and '$(VCPKG_ROOT)'!=''">$(VCPKG_ROOT)\</VcpkgRoot>
+    <VcpkgRoot Condition="'$(VcpkgRoot)'=='' and '$(VCPKG_INSTALLATION_ROOT)'!=''">$(VCPKG_INSTALLATION_ROOT)\</VcpkgRoot>
+    <VcpkgRoot Condition="'$(VcpkgRoot)'==''">$(MSBuildExtensionsPath)\..\VC\vcpkg\</VcpkgRoot>
+    <VcpkgEnableManifest>true</VcpkgEnableManifest>
+    <VcpkgManifestInstall>false</VcpkgManifestInstall>
+    <VcpkgTriplet>x64-windows-static-md</VcpkgTriplet>
+    <VcpkgInstalledDir>$(RepoRoot)out\vcpkg_installed\</VcpkgInstalledDir>
   </PropertyGroup>
+  <Import Project="$(VcpkgRoot)scripts\buildsystems\msbuild\vcpkg.props" Condition="Exists('$(VcpkgRoot)scripts\buildsystems\msbuild\vcpkg.props')" />
 </Project>

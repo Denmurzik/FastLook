@@ -1,8 +1,9 @@
 #include <winres.h>
+#include "Common/Version.h"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,1,0,0
- PRODUCTVERSION 0,1,0,0
+ FILEVERSION FASTLOOK_VERSION_RC
+ PRODUCTVERSION FASTLOOK_VERSION_RC
  FILEOS 0x40004L
  FILETYPE 0x1L
 BEGIN
@@ -10,10 +11,13 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
+            VALUE "CompanyName", "FastLook"
             VALUE "FileDescription", "FastLook"
+            VALUE "InternalName", "FastLook.exe"
+            VALUE "OriginalFilename", "FastLook.exe"
             VALUE "ProductName", "FastLook"
-            VALUE "FileVersion", "0.1.0.0"
-            VALUE "ProductVersion", "0.1.0.0"
+            VALUE "FileVersion", FASTLOOK_VERSION_STR
+            VALUE "ProductVersion", FASTLOOK_VERSION_STR
         END
     END
     BLOCK "VarFileInfo"

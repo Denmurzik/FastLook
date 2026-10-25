@@ -12,7 +12,5 @@ namespace winrt::FastLook::implementation
 
     private:
         Microsoft::UI::Xaml::Window m_window{ nullptr };
-        Microsoft::UI::Dispatching::DispatcherQueueTimer m_trimTimer{ nullptr };
-        Microsoft::UI::Dispatching::DispatcherQueueTimer m_showTimer{ nullptr };
     };
 }

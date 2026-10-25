@@ -1,0 +1,27 @@
+#include <winres.h>
+#include "Common/Version.h"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION FASTLOOK_VERSION_RC
+ PRODUCTVERSION FASTLOOK_VERSION_RC
+ FILEOS 0x40004L
+ FILETYPE 0x1L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "FastLook"
+            VALUE "FileDescription", "FastLook Viewer"
+            VALUE "InternalName", "FastLook.Viewer.exe"
+            VALUE "OriginalFilename", "FastLook.Viewer.exe"
+            VALUE "ProductName", "FastLook"
+            VALUE "FileVersion", FASTLOOK_VERSION_STR
+            VALUE "ProductVersion", FASTLOOK_VERSION_STR
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

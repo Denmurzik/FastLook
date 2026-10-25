@@ -27,3 +27,7 @@
 #include <cstdio>
 #include <string>
 #include <string_view>
+
+// The XAML compiler's XamlTypeInfo.g.cpp static_asserts that every XAML-instantiated implementation type is complete
+// through this header, so each such type's implementation header is listed here.
+#include "MainWindow.xaml.h"
