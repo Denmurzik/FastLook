@@ -76,7 +76,7 @@ $msbuildArgs = @(
     (Join-Path $repo $buildTarget),
     '/restore', "/t:$target",
     "/p:Configuration=$Configuration", '/p:Platform=x64',
-    '/m', '/nologo', '/v:minimal', '/clp:Summary',
+    '/m:2', '/p:CL_MPCount=4', '/nologo', '/v:minimal', '/clp:Summary',
     "/bl:$(Join-Path $repo "out\msbuild-$Configuration.binlog")"
 )
 if ($Toolset) { $msbuildArgs += "/p:FastLookToolset=$Toolset" }
