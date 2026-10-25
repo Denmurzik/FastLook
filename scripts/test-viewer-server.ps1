@@ -27,6 +27,8 @@ function Send($pipe, $json, $timeout = 2000) { $out = & pwsh -NoProfile -File $s
 function Visible($procId) { try { Wait-TopWindow -ProcessId $procId -TimeoutSec 1 } catch { $null } }
 
 $proc = $null; $proc2 = $null
+$savedEnv = @{}
+foreach ($n in 'FASTLOOK_DATA_DIR', 'FASTLOOK_IDLE_SECONDS', 'FASTLOOK_TEST_UI_STALL_MS') { $savedEnv[$n] = [Environment]::GetEnvironmentVariable($n) }
 $env:FASTLOOK_DATA_DIR = Join-Path $tmp 'data'
 try {
     # ---------- phase A: prewarm, show/toggle/ping/items, idle exit ----------
@@ -56,7 +58,12 @@ try {
     Check 'ping: pong re=12' ($ping -and $ping.type -eq 'pong' -and $ping.re -eq 12) ($ping | ConvertTo-Json -Compress)
     $items = Send $pipe (Msg 'items' 13 @{ items = (Items @($a, $b)); index = 0; navMode = 'folder' })
     Check 'items: ack re=13' ($items -and $items.type -eq 'ack' -and $items.re -eq 13) ($items | ConvertTo-Json -Compress)
-    $toggle = Send $pipe (Msg 'toggle' 14 @{ items = (Items @($a)); index = 0; navMode = 'selection'; listComplete = $true; explorerHwnd = 0; isDesktop = $false; monitor = 0 })
+    $toggleOther = Send $pipe (Msg 'toggle' 15 @{ items = (Items @($b)); index = 0; navMode = 'selection'; listComplete = $true; explorerHwnd = 0; isDesktop = $false; monitor = 0 })
+    Check 'toggle other item: ack shown:true re=15' ($toggleOther -and $toggleOther.type -eq 'ack' -and $toggleOther.shown -eq $true -and $toggleOther.re -eq 15) ($toggleOther | ConvertTo-Json -Compress)
+    Start-Sleep -Milliseconds 500
+    $hwnd2 = Visible $proc.Id
+    Check 'toggle other item: window visible and foreground' ($hwnd2 -and [Fg]::GetForegroundWindow() -eq $hwnd2)
+    $toggle = Send $pipe (Msg 'toggle' 14 @{ items = (Items @($b)); index = 0; navMode = 'selection'; listComplete = $true; explorerHwnd = 0; isDesktop = $false; monitor = 0 })
     Check 'toggle: ack shown:false re=14' ($toggle -and $toggle.type -eq 'ack' -and $toggle.shown -eq $false -and $toggle.re -eq 14) ($toggle | ConvertTo-Json -Compress)
     Start-Sleep -Seconds 2
     Check 'toggle: window hidden' ($null -eq (Visible $proc.Id))
@@ -117,7 +124,7 @@ try {
 }
 finally {
     foreach ($p in @($proc, $p1, $p2, $proc2)) { if ($p -and -not $p.HasExited) { & taskkill.exe /T /F /PID $p.Id *> $null } }
-    Remove-Item Env:\FASTLOOK_IDLE_SECONDS, Env:\FASTLOOK_TEST_UI_STALL_MS, Env:\FASTLOOK_DATA_DIR -ErrorAction SilentlyContinue
+    foreach ($n in $savedEnv.Keys) { [Environment]::SetEnvironmentVariable($n, $savedEnv[$n]) }
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
 }
 $failed = @($results.GetEnumerator() | Where-Object { -not $_.Value })

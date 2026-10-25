@@ -158,7 +158,16 @@ namespace fastlook::viewer
                     reply.shown = true;
                     return reply;
                 case MsgType::Toggle:
-                    reply.shown = host.Toggle(request.show); // a toggle only ever shows from hidden: PreviewSession owns the focus
+                    {
+                        // From hidden PreviewSession brings the window to the front; toggling a different item of the visible
+                        // preview re-shows it and needs it here.
+                        bool const wasVisible = host.IsPreviewVisible();
+                        reply.shown = host.Toggle(request.show);
+                        if (reply.shown && wasVisible)
+                        {
+                            ForegroundPreview();
+                        }
+                    }
                     return reply;
                 case MsgType::Items:
                     host.UpdateItems(request.items);
