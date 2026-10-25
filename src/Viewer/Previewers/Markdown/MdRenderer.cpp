@@ -835,6 +835,20 @@ namespace fastlook::viewer
             job.holder.Child(text);
         }
 
+        void CloseQuietly(winrt::Microsoft::UI::Xaml::Media::Imaging::SoftwareBitmapSource const& source)
+        {
+            try
+            {
+                if (source)
+                {
+                    source.Close();
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+
         // One picture at a time keeps the transient memory at a single decode.
         winrt::fire_and_forget LoadImages(std::shared_ptr<ImageLoad> load)
         {
@@ -855,15 +869,14 @@ namespace fastlook::viewer
                         // Attributes only: a cloud placeholder is never opened (that would download it).
                         if (core::IsCloudPlaceholderPath(job.path.native()))
                         {
-                            throw PreviewError{};
+                            failed = true;
                         }
-                        decoded = DecodeToSize(job.path, target, load->stop, load->wic);
+                        else
+                        {
+                            decoded = DecodeToSize(job.path, target, load->stop, load->wic);
+                        }
                     }
-                    catch (PreviewError const&)
-                    {
-                        failed = true;
-                    }
-                    catch (winrt::hresult_error const&)
+                    catch (...) // PreviewError, hresult_error, bad_alloc: this picture only
                     {
                         failed = true;
                     }
@@ -879,31 +892,41 @@ namespace fastlook::viewer
                         }
                         co_return;
                     }
-                    if (failed || !decoded.bitmap)
+                    if (!failed && decoded.bitmap)
                     {
-                        ShowAlt(job, load->altColor);
-                        continue;
+                        double const width = decoded.bitmap.PixelWidth() / load->scale;
+                        winrt::Microsoft::UI::Xaml::Media::Imaging::SoftwareBitmapSource source{nullptr};
+                        try
+                        {
+                            source = winrt::Microsoft::UI::Xaml::Media::Imaging::SoftwareBitmapSource{};
+                            co_await source.SetBitmapAsync(decoded.bitmap);
+                        }
+                        catch (...)
+                        {
+                            failed = true;
+                        }
+                        try
+                        {
+                            decoded.bitmap.Close();
+                        }
+                        catch (...)
+                        {
+                        }
+                        if (load->stop.stop_requested() || load->images->closed)
+                        {
+                            CloseQuietly(source);
+                            co_return;
+                        }
+                        if (!failed)
+                        {
+                            load->images->sources.push_back(source);
+                            job.image.MaxWidth(width);
+                            job.image.Source(source);
+                            continue;
+                        }
+                        CloseQuietly(source);
                     }
-                    double const width = decoded.bitmap.PixelWidth() / load->scale;
-                    winrt::Microsoft::UI::Xaml::Media::Imaging::SoftwareBitmapSource source;
-                    try
-                    {
-                        co_await source.SetBitmapAsync(decoded.bitmap);
-                    }
-                    catch (...)
-                    {
-                        decoded.bitmap.Close();
-                        throw;
-                    }
-                    decoded.bitmap.Close();
-                    if (load->stop.stop_requested() || load->images->closed)
-                    {
-                        source.Close();
-                        co_return;
-                    }
-                    load->images->sources.push_back(source);
-                    job.image.MaxWidth(width);
-                    job.image.Source(source);
+                    ShowAlt(job, load->altColor);
                 }
             }
             catch (...)

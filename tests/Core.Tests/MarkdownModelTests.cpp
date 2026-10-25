@@ -212,3 +212,19 @@ TEST(MdModel, UnknownEntityStaysLiteral)
     auto d = Parse("&notanentity; ok\n");
     EXPECT_EQ(d.blocks[0].spans[0].text, L"&notanentity; ok");
 }
+
+TEST(MdModel, InvalidUtf8BecomesReplacementCharacters)
+{
+    // A stray continuation byte, a truncated sequence, an overlong lead and a lone surrogate encoding; in text, code and a heading.
+    auto d = Parse("a\x80z \xE2\x82 \xC0\xAF \xED\xA0\x80 end\n\n```\nc\xFFx\n```\n\n# h\xF8i\n");
+    ASSERT_EQ(d.blocks.size(), 3u);
+    std::wstring text;
+    for (auto& s : d.blocks[0].spans)
+        text += s.text;
+    EXPECT_NE(text.find(L'\uFFFD'), std::wstring::npos);
+    EXPECT_EQ(text.front(), L'a');
+    EXPECT_NE(text.find(L"z "), std::wstring::npos);
+    EXPECT_NE(text.find(L" end"), std::wstring::npos);
+    EXPECT_NE(d.blocks[1].text.find(L'\uFFFD'), std::wstring::npos);
+    EXPECT_NE(d.blocks[2].spans[0].text.find(L'\uFFFD'), std::wstring::npos);
+}

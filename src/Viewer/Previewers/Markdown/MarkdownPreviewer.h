@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <memory>
 #include <stop_token>
+#include <thread>
 
 #include "Markdown/MdModel.h"
 #include "Previewers/IPreviewer.h"
@@ -29,6 +30,7 @@ namespace fastlook::viewer
         void Zoom(ZoomCommand command) override;
 
     private:
+        void StopIndexing();
         void ShowMode(bool source);
         void ToggleMode();
         bool ScrollRendered(winrt::Windows::System::VirtualKey key);
@@ -47,6 +49,7 @@ namespace fastlook::viewer
         std::unique_ptr<CodeView> m_code;
         std::shared_ptr<MdImages> m_images;
         std::stop_source m_renderStop;
+        std::jthread m_indexThread; // prefetch of the line index while the rendered view is shown
         winrt::Microsoft::UI::Xaml::Controls::Button m_toggle{nullptr};
     };
 }

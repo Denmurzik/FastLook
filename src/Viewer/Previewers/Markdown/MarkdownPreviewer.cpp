@@ -40,16 +40,28 @@ namespace fastlook::viewer
             }
         }
 
-        bool ReadAll(std::filesystem::path const& path, std::vector<uint8_t>& out)
+        enum class ReadResult
+        {
+            Ok,
+            TooLarge, // grew past the render cap after it was opened
+            Failed
+        };
+
+        ReadResult ReadAll(std::filesystem::path const& path, std::vector<uint8_t>& out)
         {
             HANDLE const file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
                                             OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
             if (file == INVALID_HANDLE_VALUE)
             {
-                return false;
+                return ReadResult::Failed;
             }
             LARGE_INTEGER size{};
-            bool ok = GetFileSizeEx(file, &size) && static_cast<uint64_t>(size.QuadPart) <= kMaxRenderedBytes;
+            bool ok = GetFileSizeEx(file, &size) != FALSE;
+            if (ok && static_cast<uint64_t>(size.QuadPart) > kMaxRenderedBytes)
+            {
+                CloseHandle(file);
+                return ReadResult::TooLarge;
+            }
             if (ok)
             {
                 out.resize(static_cast<size_t>(size.QuadPart));
@@ -57,12 +69,24 @@ namespace fastlook::viewer
                 ok = out.empty() || (ReadFile(file, out.data(), static_cast<DWORD>(out.size()), &read, nullptr) && read == out.size());
             }
             CloseHandle(file);
-            return ok;
+            return ok ? ReadResult::Ok : ReadResult::Failed;
         }
 
     }
 
-    MarkdownPreviewer::~MarkdownPreviewer() = default;
+    MarkdownPreviewer::~MarkdownPreviewer()
+    {
+        StopIndexing();
+    }
+
+    void MarkdownPreviewer::StopIndexing()
+    {
+        if (m_indexThread.joinable())
+        {
+            m_indexThread.request_stop();
+            m_indexThread.join(); // BuildIndex checks the stop token between chunks
+        }
+    }
 
     winrt::Windows::Foundation::IAsyncAction MarkdownPreviewer::PrepareAsync(PreviewItem item, std::shared_ptr<PreviewContext const> ctx)
     {
@@ -94,13 +118,18 @@ namespace fastlook::viewer
         // source view is first shown.
         core::md::Document parsed;
         bool sourceOnly = doc->SizeBytes() > kMaxRenderedBytes;
+        std::vector<uint8_t> bytes;
         if (!sourceOnly)
         {
-            std::vector<uint8_t> bytes;
-            if (!ReadAll(path, bytes))
+            ReadResult const read = ReadAll(path, bytes);
+            if (read == ReadResult::Failed)
             {
                 throw PreviewError{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
             }
+            sourceOnly = read == ReadResult::TooLarge;
+        }
+        if (!sourceOnly)
+        {
             auto const info = doc->Encoding();
             std::span<const uint8_t> body{bytes};
             body = body.subspan(std::min<size_t>(info.bomLength, body.size()));
@@ -122,7 +151,8 @@ namespace fastlook::viewer
         {
             co_return;
         }
-        if (sourceOnly)
+        // Source is shown first (or only): index now. Otherwise View() prefetches the index on a thread for a later toggle.
+        if (sourceOnly || ctx->settings.preview.markdownView == core::MarkdownView::Source)
         {
             doc->BuildIndex(stop.get_token(), [](uint64_t, bool) {});
             if (cancel())
@@ -149,7 +179,22 @@ namespace fastlook::viewer
     winrt::Microsoft::UI::Xaml::UIElement MarkdownPreviewer::View()
     {
         m_root = winrt::Microsoft::UI::Xaml::Controls::Grid{};
-        ShowMode(m_sourceOnly || m_ctx->settings.preview.markdownView == core::MarkdownView::Source);
+        bool const source = m_sourceOnly || m_ctx->settings.preview.markdownView == core::MarkdownView::Source;
+        if (!source && !m_doc->IndexComplete())
+        {
+            // Rendered first: the line index for a later toggle to Source (a file of at most 2 MiB) is built meanwhile.
+            m_indexThread = std::jthread([doc = m_doc](std::stop_token stop) {
+                try
+                {
+                    doc->BuildIndex(stop, [](uint64_t, bool) {});
+                }
+                catch (...)
+                {
+                    FL_LOG_INFO(L"Indexing the markdown source failed");
+                }
+            });
+        }
+        ShowMode(source);
         return m_root;
     }
 
@@ -160,6 +205,7 @@ namespace fastlook::viewer
 
     void MarkdownPreviewer::Unload()
     {
+        StopIndexing();
         m_renderStop.request_stop();
         m_renderStop = {};
         if (m_images)
@@ -192,9 +238,14 @@ namespace fastlook::viewer
         {
             if (!m_code)
             {
+                // Normally long done; waits only for the tail of the prefetch started in View().
+                if (m_indexThread.joinable())
+                {
+                    m_indexThread.join();
+                }
                 if (!m_doc->IndexComplete())
                 {
-                    m_doc->BuildIndex({}, [](uint64_t, bool) {}); // at most 2 MiB here (larger files were indexed in PrepareAsync)
+                    m_doc->BuildIndex({}, [](uint64_t, bool) {}); // the prefetch was stopped or failed; at most 2 MiB
                 }
                 m_code = std::make_unique<CodeView>(m_doc);
                 m_code->SetStyler(m_styler);
