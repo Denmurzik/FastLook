@@ -41,6 +41,9 @@ TEST(KeyMap, ZoomAndCopy)
     EXPECT_EQ(MapPreviewKey('0', true, false, false, false), Command::ZoomReset);
     EXPECT_EQ(MapPreviewKey(VK_NUMPAD0, true, false, false, false), Command::ZoomReset);
     EXPECT_EQ(MapPreviewKey('C', true, false, false, false), Command::Copy);
+    EXPECT_EQ(MapPreviewKey(VK_OEM_PLUS, true, true, false, false), Command::ZoomIn);
+    EXPECT_FALSE(MapPreviewKey(VK_OEM_MINUS, true, true, false, false));
+    EXPECT_FALSE(MapPreviewKey(VK_OEM_PLUS, false, true, false, false));
     EXPECT_FALSE(MapPreviewKey('C', false, false, false, false));
     EXPECT_FALSE(MapPreviewKey(VK_OEM_PLUS, false, false, false, false));
     EXPECT_FALSE(MapPreviewKey('C', true, true, false, false));

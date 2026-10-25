@@ -483,6 +483,7 @@ namespace fastlook::viewer
                 return;
             }
             CancelCurrent();
+            m_pinPending = false; // a pin requested during a failing load must not pin the next item
             winrt::Microsoft::UI::Xaml::Controls::TextBlock text;
             text.Text(Str(L"Common", L"PreviewFailed"));
             text.HorizontalAlignment(winrt::Microsoft::UI::Xaml::HorizontalAlignment::Center);
@@ -853,6 +854,11 @@ namespace fastlook::viewer
             if (serial != m_hideSerial)
             {
                 co_return; // shown again while the window was animating out
+            }
+
+            if (host.Window()->IsFullscreen())
+            {
+                host.Window()->ToggleFullscreen(); // the next show starts windowed
             }
 
             // Give the foreground back to the Explorer window the preview was opened from while our window still holds it:

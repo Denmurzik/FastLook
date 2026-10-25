@@ -6,7 +6,8 @@ namespace fastlook::core
 {
     std::optional<Command> MapPreviewKey(uint32_t vk, bool ctrl, bool shift, bool alt, bool pinned)
     {
-        if (shift || alt)
+        // Ctrl+Shift+= is the physical "+" on layouts where "+" needs Shift.
+        if (alt || (shift && !(ctrl && vk == VK_OEM_PLUS)))
         {
             return std::nullopt;
         }

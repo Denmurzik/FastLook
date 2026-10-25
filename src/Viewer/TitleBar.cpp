@@ -250,16 +250,19 @@ namespace fastlook::viewer
             int const size = std::max(16, GetSystemMetrics(SM_CXSMICON));
             co_await winrt::resume_background();
             auto pixels = RenderShellIcon(path, size);
-            if (pixels.empty())
-            {
-                co_return;
-            }
             if (!co_await ResumeOn(ui))
             {
                 co_return;
             }
             if (generation != m_iconGeneration)
             {
+                co_return;
+            }
+            if (pixels.empty())
+            {
+                // No icon: show none and let the next SetIconFor for this path retry.
+                m_icon.Source(nullptr);
+                m_iconPath.clear();
                 co_return;
             }
             winrt::Microsoft::UI::Xaml::Media::Imaging::WriteableBitmap bitmap{size, size};

@@ -39,6 +39,9 @@ namespace winrt::FastLook::implementation
         // A pinned window gets minimize/maximize, appears in the switchers and loses its Pin button.
         void SetPinned(bool pinned);
         bool Pinned() const noexcept { return m_pinned; }
+        // Full-screen presenter without the title bar; leaving restores the previous bounds.
+        bool IsFullscreen() const noexcept { return m_fullscreen; }
+        void ToggleFullscreen();
 
         // Title-bar buttons.
         void SetCommandHandler(std::function<void(fastlook::core::Command)> handler);
@@ -51,6 +54,8 @@ namespace winrt::FastLook::implementation
         HWND m_hwnd = nullptr;
         UINT m_insetDpi = 0;
         bool m_pinned = false;
+        bool m_fullscreen = false;
+        Windows::Graphics::RectInt32 m_windowedBounds{};
         std::optional<bool> m_captionDark;
         std::shared_ptr<fastlook::viewer::TitleBar> m_titleBar;
         std::function<bool(uint32_t, bool, bool, bool)> m_keyHandler;

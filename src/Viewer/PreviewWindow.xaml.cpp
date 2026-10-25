@@ -206,6 +206,36 @@ namespace winrt::FastLook::implementation
         titleBar.ButtonInactiveBackgroundColor(clear);
     }
 
+    void PreviewWindow::ToggleFullscreen()
+    {
+        auto appWindow = AppWindow();
+        auto const bar = RootGrid().RowDefinitions().GetAt(0);
+        if (!m_fullscreen)
+        {
+            auto const position = appWindow.Position();
+            auto const size = appWindow.Size();
+            m_windowedBounds = {position.X, position.Y, size.Width, size.Height};
+            m_fullscreen = true;
+            bar.Height(GridLengthHelper::FromPixels(0));
+            TitleBarHost().Visibility(Visibility::Collapsed);
+            appWindow.SetPresenter(AppWindowPresenterKind::FullScreen);
+        }
+        else
+        {
+            m_fullscreen = false;
+            appWindow.SetPresenter(AppWindowPresenterKind::Overlapped);
+            if (auto presenter = appWindow.Presenter().try_as<OverlappedPresenter>())
+            {
+                presenter.IsMinimizable(m_pinned);
+                presenter.IsMaximizable(m_pinned);
+            }
+            appWindow.MoveAndResize(m_windowedBounds);
+            bar.Height(GridLengthHelper::FromPixels(48));
+            TitleBarHost().Visibility(Visibility::Visible);
+            UpdateCaptionInset();
+        }
+    }
+
     void PreviewWindow::SetPinned(bool pinned)
     {
         m_pinned = pinned;

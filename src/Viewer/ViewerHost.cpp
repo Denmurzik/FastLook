@@ -14,6 +14,16 @@
 
 namespace fastlook::viewer
 {
+    // A preview that was pinned: its own window, the previewer that fills it and the item it shows.
+    struct ViewerHost::PinnedWindow
+    {
+        winrt::FastLook::PreviewWindow window{nullptr};
+        std::shared_ptr<IPreviewer> previewer;
+        PreviewItem item;
+        winrt::event_token closingToken{};
+        bool closed = false;
+    };
+
     ViewerHost& ViewerHost::Get()
     {
         // Intentionally leaked: it holds WinRT objects that CRT static destruction would release after WinRT teardown.
@@ -60,8 +70,15 @@ namespace fastlook::viewer
             theme = ElementTheme::Dark;
         }
         auto* window = winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(m_window);
+        bool const dark = Dark();
         window->SetTheme(theme);
-        window->ApplyCaptionColors(Dark());
+        window->ApplyCaptionColors(dark);
+        for (auto const& pinned : m_pinned)
+        {
+            auto* pinnedWindow = winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(pinned->window);
+            pinnedWindow->SetTheme(theme);
+            pinnedWindow->ApplyCaptionColors(dark);
+        }
     }
 
     void ViewerHost::RefreshChrome()
@@ -192,7 +209,10 @@ namespace fastlook::viewer
             m_session->Zoom(ZoomCommand::Reset);
             break;
         case Command::ToggleFullscreen:
-            FL_LOG_INFO(L"ToggleFullscreen: not implemented");
+            if (m_window && IsPreviewVisible())
+            {
+                winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(m_window)->ToggleFullscreen();
+            }
             break;
         case Command::Pin:
             PinCurrent();
@@ -251,23 +271,22 @@ namespace fastlook::viewer
         }
     }
 
-    // A preview that was pinned: its own window, the previewer that fills it and the item it shows.
-    struct ViewerHost::PinnedWindow
-    {
-        winrt::FastLook::PreviewWindow window{nullptr};
-        std::shared_ptr<IPreviewer> previewer;
-        PreviewItem item;
-        winrt::event_token closingToken{};
-        bool closed = false;
-    };
-
     bool ViewerHost::HandleKey(uint32_t vk, bool ctrl, bool shift, bool alt)
     {
         if (!m_session)
         {
             return false;
         }
-        return DispatchKey(m_session->AttachedPreviewer(), vk, ctrl, shift, alt, false, [this](Command command) { Execute(command); });
+        return DispatchKey(m_session->AttachedPreviewer(), vk, ctrl, shift, alt, false, [this, vk](Command command) {
+            auto* window = m_window ? winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(m_window) : nullptr;
+            // The first Esc leaves full screen, the second closes.
+            if (command == Command::Close && vk == VK_ESCAPE && window && window->IsFullscreen())
+            {
+                window->ToggleFullscreen();
+                return;
+            }
+            Execute(command);
+        });
     }
 
     void ViewerHost::PinCurrent()
@@ -303,7 +322,15 @@ namespace fastlook::viewer
         });
         impl->SetKeyHandler([this, weak](uint32_t vk, bool ctrl, bool shift, bool alt) {
             auto strong = weak.lock();
-            return strong && DispatchKey(strong->previewer, vk, ctrl, shift, alt, true, [&](Command command) { ExecutePinned(strong, command); });
+            return strong && DispatchKey(strong->previewer, vk, ctrl, shift, alt, true, [&](Command command) {
+                auto* window = winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(strong->window);
+                if (command == Command::Close && vk == VK_ESCAPE && window->IsFullscreen())
+                {
+                    window->ToggleFullscreen();
+                    return;
+                }
+                ExecutePinned(strong, command);
+            });
         });
         pinned->closingToken = pinned->window.AppWindow().Closing(
             [this, weak](auto const&, winrt::Microsoft::UI::Windowing::AppWindowClosingEventArgs const&) {
@@ -366,10 +393,12 @@ namespace fastlook::viewer
         case Command::Copy:
             actions::CopyFile(hwnd, pinned->item);
             break;
+        case Command::ToggleFullscreen:
+            winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(pinned->window)->ToggleFullscreen();
+            break;
         case Command::Next:
         case Command::Prev:
         case Command::Pin:
-        case Command::ToggleFullscreen:
             break; // a pinned window shows one fixed item
         }
     }
