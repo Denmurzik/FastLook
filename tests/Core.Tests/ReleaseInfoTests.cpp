@@ -37,6 +37,18 @@ TEST(ReleaseInfo, MissingAssetsRejected)
     EXPECT_FALSE(ParseLatestRelease(R"({"tag_name":"nightly","assets":[]})"));
 }
 
+TEST(ReleaseInfo, RejectsAssetsOutsideOwnRepositoryOrTag)
+{
+    constexpr char kOtherRepo[] = R"({"tag_name":"v1.0.0","assets":[
+        {"name":"FastLook-Setup-1.0.0.exe","browser_download_url":"https://github.com/evil/FastLook/releases/download/v1.0.0/FastLook-Setup-1.0.0.exe"},
+        {"name":"FastLook-Setup-1.0.0.exe.sha256","browser_download_url":"https://github.com/evil/FastLook/releases/download/v1.0.0/FastLook-Setup-1.0.0.exe.sha256"}]})";
+    EXPECT_FALSE(ParseLatestRelease(kOtherRepo));
+    constexpr char kOtherTag[] = R"({"tag_name":"v1.0.0","assets":[
+        {"name":"FastLook-Setup-1.0.0.exe","browser_download_url":"https://github.com/Denmurzik/FastLook/releases/download/v0.9.0/FastLook-Setup-1.0.0.exe"},
+        {"name":"FastLook-Setup-1.0.0.exe.sha256","browser_download_url":"https://github.com/Denmurzik/FastLook/releases/download/v0.9.0/FastLook-Setup-1.0.0.exe.sha256"}]})";
+    EXPECT_FALSE(ParseLatestRelease(kOtherTag));
+}
+
 TEST(ReleaseInfo, RejectsAssetsFromForeignHostOrWrongVersion)
 {
     constexpr char kForeign[] = R"({"tag_name":"v1.0.0","assets":[

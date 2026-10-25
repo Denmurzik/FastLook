@@ -89,6 +89,8 @@ namespace fastlook::core
         std::string const bare = info.tag.starts_with('v') ? info.tag.substr(1) : info.tag;
         std::string const setupName = "FastLook-Setup-" + bare + ".exe";
         std::string const shaName = setupName + ".sha256";
+        // Only this repository's own release downloads of this tag count; the redirect target is checked per hop later.
+        std::string const downloadPrefix = "https://github.com/Denmurzik/FastLook/releases/download/" + info.tag + "/";
         auto const assets = doc.find("assets");
         if (assets == doc.end() || !assets->is_array())
         {
@@ -102,7 +104,7 @@ namespace fastlook::core
             }
             auto const name = StringField(asset, "name");
             auto const url = StringField(asset, "browser_download_url");
-            if (!IsAllowedUpdateUrl(url))
+            if (!url.starts_with(downloadPrefix))
             {
                 continue;
             }

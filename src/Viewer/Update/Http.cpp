@@ -111,10 +111,13 @@ namespace fastlook::viewer
                 return false;
             }
             DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
-            WinHttpSetOption(request.get(), WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy));
+            // Fail closed: WinHTTP's default policy would follow https redirects to any host.
+            if (!WinHttpSetOption(request.get(), WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy)))
+            {
+                return false;
+            }
 
-            static constexpr wchar_t kHeaders[] = L"Accept: application/vnd.github+json\r\nX-GitHub-Api-Version: 2022-11-28\r\n";
-            if (!WinHttpSendRequest(request.get(), kHeaders, static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+            if (!WinHttpSendRequest(request.get(), headers, static_cast<DWORD>(-1), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
                 !WinHttpReceiveResponse(request.get(), nullptr))
             {
                 return false;
@@ -134,12 +137,12 @@ namespace fastlook::viewer
         constexpr wchar_t kFileHeaders[] = L"Accept: application/octet-stream\r\n";
 
         // Opens the final (non-redirect) response of `url`. The handles stay alive in the out parameters.
-        bool OpenFollowing(std::wstring url, std::chrono::seconds timeout, wchar_t const* headers, bool allowAnyFirst,
+        bool OpenFollowing(std::wstring url, std::chrono::seconds timeout, wchar_t const* headers,
                            Handle& session, Handle& connection, Handle& request, uint32_t& status)
         {
             for (int hop = 0; hop <= kMaxHops; ++hop)
             {
-                if (!(hop == 0 && allowAnyFirst) && !core::IsAllowedUpdateUrl(core::ToUtf8(url)))
+                if (!core::IsAllowedUpdateUrl(core::ToUtf8(url)))
                 {
                     FL_LOG_INFO(L"Update request to a disallowed URL refused");
                     return false;
@@ -163,11 +166,11 @@ namespace fastlook::viewer
         }
     }
 
-    std::optional<HttpResult> HttpGet(std::wstring const& url, std::chrono::seconds timeout, bool allowAnyUrl)
+    std::optional<HttpResult> HttpGet(std::wstring const& url, std::chrono::seconds timeout)
     {
         Handle session, connection, request;
         HttpResult result;
-        if (!OpenFollowing(url, timeout, kApiHeaders, allowAnyUrl, session, connection, request, result.status))
+        if (!OpenFollowing(url, timeout, kApiHeaders, session, connection, request, result.status))
         {
             return std::nullopt;
         }
@@ -198,12 +201,12 @@ namespace fastlook::viewer
     }
 
     bool HttpDownload(std::wstring const& url, std::filesystem::path const& to,
-                      std::function<void(uint64_t got, uint64_t total)> progress, std::stop_token stop)
+                      std::function<void(uint64_t got, uint64_t total)> progress, std::stop_token stop, uint64_t maxBytes)
     {
         Handle session, connection, request;
         uint32_t status = 0;
         // A download has no latency budget like a metadata call; the per-operation timeout still ends a stalled one.
-        if (!OpenFollowing(url, std::chrono::seconds(30), kFileHeaders, false, session, connection, request, status) || status != 200)
+        if (!OpenFollowing(url, std::chrono::seconds(30), kFileHeaders, session, connection, request, status) || status != 200)
         {
             return false;
         }
@@ -214,6 +217,10 @@ namespace fastlook::viewer
             {
                 total = _wcstoui64(length.c_str(), nullptr, 10);
             }
+        }
+        if (total > maxBytes)
+        {
+            return false;
         }
 
         bool ok = false;
@@ -241,7 +248,7 @@ namespace fastlook::viewer
                 }
                 out.write(buffer.data(), got);
                 received += got;
-                if (!out)
+                if (!out || received > maxBytes)
                 {
                     ok = false;
                     break;

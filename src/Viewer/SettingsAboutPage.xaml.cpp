@@ -130,7 +130,7 @@ namespace winrt::FastLook::implementation
                 if (!started && element.XamlRoot())
                 {
                     started = true;
-                    CheckUpdates(Button{}, element.XamlRoot());
+                    CheckUpdates(Button{nullptr}, element.XamlRoot());
                 }
             });
         }

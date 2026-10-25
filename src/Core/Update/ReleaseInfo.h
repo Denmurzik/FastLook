@@ -18,7 +18,8 @@ namespace fastlook::core
     };
 
     // Reads a GitHub "latest release" document. Needs a SemVer tag_name and both FastLook-Setup-<ver>.exe and
-    // FastLook-Setup-<ver>.exe.sha256 assets with allowed download URLs; anything else yields nullopt.
+    // FastLook-Setup-<ver>.exe.sha256 assets whose URLs lie under https://github.com/Denmurzik/FastLook/releases/download/<tag>/;
+    // anything else yields nullopt.
     std::optional<ReleaseInfo> ParseLatestRelease(std::string_view json);
 
     // https:// and a host of the GitHub release infrastructure (api.github.com, github.com, objects.githubusercontent.com,

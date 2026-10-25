@@ -14,6 +14,7 @@
 #include "System/AppPaths.h"
 #include "Text/Utf.h"
 #include "Update/Http.h"
+#include "Update/InstallerPipeline.h"
 #include "Update/ReleaseInfo.h"
 #include "Util/Async.h"
 #include "Util/SettingsUi.h"
@@ -31,7 +32,6 @@ namespace fastlook::viewer
 
         constexpr wchar_t kMap[] = L"Update";
         constexpr wchar_t kReleasesPage[] = L"https://github.com/Denmurzik/FastLook/releases/latest";
-        constexpr wchar_t kInstallerArgs[] = L"/SILENT /SUPPRESSMSGBOXES /NORESTART";
 
         enum class FetchOutcome
         {
@@ -46,24 +46,18 @@ namespace fastlook::viewer
             core::ReleaseInfo release;
         };
 
-        enum class DownloadOutcome
-        {
-            Verified,
-            Cancelled,
-            Failed,
-            Mismatch
-        };
-
         // A dialog that has been asked to show; Dismiss closes it even when it has not finished opening yet.
         struct ShownDialog
         {
             ContentDialog dialog{nullptr};
             IAsyncOperation<ContentDialogResult> operation{nullptr};
             std::shared_ptr<std::atomic<bool>> opened;
+            // Set by Dismiss before it hides the dialog: any other close is the user's (button, Esc, window gone).
+            std::shared_ptr<std::atomic<bool>> dismissing;
         };
 
         ShownDialog Show(XamlRoot const& root, hstring const& title, Windows::Foundation::IInspectable const& content,
-                         hstring const& primary, hstring const& close)
+                         hstring const& primary, hstring const& close, std::stop_source cancel = {})
         {
             ContentDialog dialog;
             dialog.XamlRoot(root);
@@ -75,7 +69,15 @@ namespace fastlook::viewer
             ShownDialog shown;
             shown.dialog = dialog;
             shown.opened = std::make_shared<std::atomic<bool>>(false);
+            shown.dismissing = std::make_shared<std::atomic<bool>>(false);
             dialog.Opened([opened = shown.opened](auto const&, auto const&) { *opened = true; });
+            // Captures flags and the stop source only: the dialog owns this handler, a control capture would be a cycle.
+            dialog.Closing([dismissing = shown.dismissing, source = cancel](auto const&, auto const&) mutable {
+                if (!*dismissing)
+                {
+                    source.request_stop();
+                }
+            });
             shown.operation = dialog.ShowAsync();
             return shown;
         }
@@ -91,6 +93,7 @@ namespace fastlook::viewer
         // Hides a dialog shown by Show and waits until it is gone. False when the UI queue is shutting down.
         IAsyncOperation<bool> Dismiss(ShownDialog shown, DispatcherQueue ui)
         {
+            *shown.dismissing = true;
             for (int i = 0; i < 100 && !*shown.opened && shown.operation.Status() == Windows::Foundation::AsyncStatus::Started; ++i)
             {
                 co_await resume_after(std::chrono::milliseconds(20));
@@ -117,11 +120,22 @@ namespace fastlook::viewer
             co_return co_await shown.operation;
         }
 
+        // Empty when the temp directory cannot be determined: callers must not wipe a relative path.
         std::filesystem::path UpdateDir()
         {
-            wchar_t buffer[MAX_PATH + 2]{};
-            DWORD const n = GetTempPathW(static_cast<DWORD>(std::size(buffer)), buffer);
-            return std::filesystem::path(std::wstring(buffer, n)) / L"FastLook-Update";
+            std::wstring buffer(MAX_PATH + 2, wchar_t{});
+            DWORD n = GetTempPathW(static_cast<DWORD>(buffer.size()), buffer.data());
+            if (n >= buffer.size())
+            {
+                buffer.resize(n + 1);
+                n = GetTempPathW(static_cast<DWORD>(buffer.size()), buffer.data());
+            }
+            if (n == 0 || n >= buffer.size())
+            {
+                return {};
+            }
+            buffer.resize(n);
+            return std::filesystem::path(buffer) / L"FastLook-Update";
         }
 
         std::optional<std::string> ReadWholeFile(std::filesystem::path const& path)
@@ -154,9 +168,10 @@ namespace fastlook::viewer
             std::string body;
             auto const override = ApiOverride();
             std::error_code ec;
-            if (!override.empty() && std::filesystem::is_regular_file(override, ec))
+            if (!override.empty())
             {
-                auto text = ReadWholeFile(override);
+                // Test hook: a local JSON file replaces the API answer. Anything else (a URL) is refused, not followed.
+                auto text = std::filesystem::is_regular_file(override, ec) ? ReadWholeFile(override) : std::nullopt;
                 if (!text)
                 {
                     return result;
@@ -165,8 +180,7 @@ namespace fastlook::viewer
             }
             else
             {
-                auto const url = override.empty() ? core::FromUtf8(core::kReleasesApi) : override;
-                auto const response = HttpGet(url, std::chrono::seconds(15), !override.empty());
+                auto const response = HttpGet(core::FromUtf8(core::kReleasesApi), std::chrono::seconds(15));
                 if (!response)
                 {
                     return result;
@@ -193,55 +207,6 @@ namespace fastlook::viewer
             return result;
         }
 
-        // Runs on a worker thread. Leaves only a verified installer in `dir`.
-        DownloadOutcome DownloadAndVerify(core::ReleaseInfo const& release, std::filesystem::path const& dir,
-                                          std::function<void(uint64_t, uint64_t)> const& progress, std::stop_token stop)
-        {
-            std::error_code ec;
-            std::filesystem::remove_all(dir, ec);
-            std::filesystem::create_directories(dir, ec);
-            auto const setup = dir / release.setupName;
-            auto const sha = dir / (release.setupName + ".sha256");
-            auto const fail = [&](DownloadOutcome outcome) {
-                std::error_code ignore;
-                std::filesystem::remove(setup, ignore);
-                std::filesystem::remove(sha, ignore);
-                return outcome;
-            };
-
-            if (!HttpDownload(core::FromUtf8(release.shaUrl), sha, nullptr, stop))
-            {
-                return fail(stop.stop_requested() ? DownloadOutcome::Cancelled : DownloadOutcome::Failed);
-            }
-            if (!HttpDownload(core::FromUtf8(release.setupUrl), setup, progress, stop))
-            {
-                return fail(stop.stop_requested() ? DownloadOutcome::Cancelled : DownloadOutcome::Failed);
-            }
-            auto const shaText = ReadWholeFile(sha);
-            auto const expected = shaText ? core::ParseSha256Line(*shaText, release.setupName) : std::nullopt;
-            auto const actual = core::Sha256File(setup);
-            if (!expected || !actual || *expected != *actual)
-            {
-                FL_LOG_INFO(L"Update: installer SHA-256 check failed");
-                return fail(DownloadOutcome::Mismatch);
-            }
-            return DownloadOutcome::Verified;
-        }
-
-        bool LaunchInstaller(std::filesystem::path const& setup)
-        {
-            SHELLEXECUTEINFOW info{};
-            info.cbSize = sizeof(info);
-            info.lpVerb = L"open";
-            auto const file = setup.wstring();
-            auto const dir = setup.parent_path().wstring();
-            info.lpFile = file.c_str();
-            info.lpParameters = kInstallerArgs;
-            info.lpDirectory = dir.c_str();
-            info.nShow = SW_SHOWNORMAL;
-            return ShellExecuteExW(&info) != FALSE;
-        }
-
         void OpenReleasePage(core::ReleaseInfo const& release)
         {
             auto const url = release.htmlUrl.empty() ? std::wstring{kReleasesPage} : core::FromUtf8(release.htmlUrl);
@@ -265,9 +230,7 @@ namespace fastlook::viewer
             content.Children().Append(bar);
 
             std::stop_source cancel;
-            auto shown = Show(root, title, content, {}, Str(kMap, L"Cancel"));
-            // Only the stop source is captured: the dialog owns the button, so a capture of a control would be a cycle.
-            shown.dialog.CloseButtonClick([source = cancel](auto const&, auto const&) mutable { source.request_stop(); });
+            auto shown = Show(root, title, content, {}, Str(kMap, L"Cancel"), cancel);
 
             auto const progress = [ui, weakBar = make_weak(bar), weakStatus = make_weak(status), downloadingPattern,
                                    last = std::make_shared<std::atomic<int>>(-1)](uint64_t got, uint64_t total) {
@@ -295,7 +258,11 @@ namespace fastlook::viewer
 
             auto const dir = UpdateDir();
             co_await resume_background();
-            auto const outcome = DownloadAndVerify(release, dir, progress, cancel.get_token());
+            auto const fetch = [](std::string const& url, std::filesystem::path const& to, uint64_t maxBytes,
+                                  core::ProgressFn const& onProgress, std::stop_token stop) {
+                return HttpDownload(core::FromUtf8(url), to, onProgress, stop, maxBytes);
+            };
+            auto const outcome = core::DownloadAndVerifyInstaller(release, dir, fetch, progress, cancel.get_token());
             if (!co_await ResumeOn(ui))
             {
                 co_return;
@@ -307,21 +274,31 @@ namespace fastlook::viewer
 
             switch (outcome)
             {
-            case DownloadOutcome::Cancelled:
+            case core::DownloadOutcome::Cancelled:
                 co_return;
-            case DownloadOutcome::Mismatch:
+            case core::DownloadOutcome::Mismatch:
                 co_await Ask(root, title, Str(kMap, L"HashMismatch"), {}, Str(kMap, L"Close"));
                 co_return;
-            case DownloadOutcome::Failed:
+            case core::DownloadOutcome::Failed:
                 co_await Ask(root, title, Str(kMap, L"NetworkError"), {}, Str(kMap, L"Close"));
                 co_return;
-            case DownloadOutcome::Verified:
+            case core::DownloadOutcome::Verified:
                 break;
             }
 
-            if (!LaunchInstaller(dir / release.setupName))
+            // The user may have closed the dialog while the installer was being hashed.
+            if (cancel.stop_requested())
+            {
+                co_return;
+            }
+            auto installing = Show(root, title, WrappedText(Str(kMap, L"Installing")), {}, {});
+            if (!core::LaunchInstaller(dir / release.setupName))
             {
                 FL_LOG_INFO(L"Update: starting the installer failed ({})", GetLastError());
+                if (!co_await Dismiss(installing, ui))
+                {
+                    co_return;
+                }
                 co_await Ask(root, title, Str(kMap, L"InstallFailed"), {}, Str(kMap, L"Close"));
                 co_return;
             }
@@ -342,8 +319,7 @@ namespace fastlook::viewer
             checking.Children().Append(busy);
 
             std::stop_source cancel;
-            auto shown = Show(root, title, checking, {}, Str(kMap, L"Cancel"));
-            shown.dialog.CloseButtonClick([source = cancel](auto const&, auto const&) mutable { source.request_stop(); });
+            auto shown = Show(root, title, checking, {}, Str(kMap, L"Cancel"), cancel);
 
             co_await resume_background();
             auto fetched = FetchLatest();
