@@ -89,8 +89,15 @@
   </ItemGroup>
   <!-- Microsoft.UI.Xaml.winmd mentions CoreWebView2 (the WebView2 control). C++/WinRT needs its metadata to project WinUI;
        FastLook never uses WebView2, so the winmd is compile-only (Private=false) and nothing is deployed. -->
+  <!-- Version coupling: Microsoft.WindowsAppSDK.WinUI depends on Microsoft.Web.WebView2. FastLookWebView2Version pins that
+       version in one place (PackageReference and winmd path both use it). If WinUI moves to a newer WebView2, restore fails
+       with NU1605 until this value is raised. -->
+  <PropertyGroup>
+    <FastLookWebView2Version>1.0.3719.77</FastLookWebView2Version>
+  </PropertyGroup>
   <ItemGroup>
-    <Reference Include="$(NuGetPackageRoot)microsoft.web.webview2\1.0.3719.77\lib\Microsoft.Web.WebView2.Core.winmd">
+    <PackageReference Include="Microsoft.Web.WebView2" Version="$(FastLookWebView2Version)" PrivateAssets="all" />
+    <Reference Include="$(NuGetPackageRoot)microsoft.web.webview2\$(FastLookWebView2Version)\lib\Microsoft.Web.WebView2.Core.winmd">
       <IsWinMDFile>true</IsWinMDFile>
       <Private>false</Private>
     </Reference>

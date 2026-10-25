@@ -30,4 +30,5 @@
 
 // The XAML compiler's XamlTypeInfo.g.cpp static_asserts that every XAML-instantiated implementation type is complete
 // through this header, so each such type's implementation header is listed here.
+// Every XAML-instantiated page/control implementation header must be included here (XAML compiler requirement).
 #include "MainWindow.xaml.h"
