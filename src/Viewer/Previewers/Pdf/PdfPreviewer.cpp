@@ -468,7 +468,10 @@ namespace fastlook::viewer
             if (!isVisible(it->first))
             {
                 it->second.job->Cancel();
-                m_lru.Erase(it->first);
+                if (!m_rendered.contains(it->first))
+                {
+                    m_lru.Erase(it->first);
+                }
                 it = m_rendering.erase(it);
             }
             else
@@ -484,18 +487,33 @@ namespace fastlook::viewer
             {
                 continue;
             }
-            if (m_rendered.contains(index) || m_rendering.contains(index))
+            uint64_t const natural = static_cast<uint64_t>(InnerWidthPx() * InnerWidthPx() * PageAspect(index));
+            uint64_t wanted = std::min<uint64_t>(static_cast<uint64_t>(share), std::max<uint64_t>(natural, 1));
+            auto const rendered = m_rendered.find(index);
+            if (m_rendering.contains(index))
             {
                 m_lru.Touch(index);
                 continue;
             }
-            uint64_t const natural = static_cast<uint64_t>(InnerWidthPx() * InnerWidthPx() * PageAspect(index));
-            uint64_t wanted = std::min<uint64_t>(static_cast<uint64_t>(share), std::max<uint64_t>(natural, 1));
+            if (rendered != m_rendered.end())
+            {
+                m_lru.Touch(index);
+                // Squeezed earlier, and the visible count has dropped since: re-render sharper (the old image stays until then).
+                if (rendered->second.px * 5 >= wanted * 4)
+                {
+                    continue;
+                }
+            }
             if (m_rendering.size() >= (wanted > kSerialAbovePx ? 1u : 2u))
             {
                 break; // the next finish pumps again
             }
+            uint64_t const previousPx = rendered != m_rendered.end() ? rendered->second.px : 0;
             wanted = Reserve(index, wanted, visible);
+            if (previousPx != 0 && wanted * 4 < previousPx * 5)
+            {
+                continue; // the budget still allows no sharper image
+            }
             uint32_t const widthPx = WidthForPixels(index, wanted);
             auto job = std::make_shared<RenderJob>();
             uint64_t const id = ++m_nextRenderId;
@@ -514,7 +532,9 @@ namespace fastlook::viewer
             Evict(*evicted);
         }
         auto const budget = static_cast<uint64_t>(kBudgetPixels);
-        while (CachedPixels() + wanted > budget)
+        auto const own = m_rendered.contains(index) ? m_rendered.at(index).px : 0; // replaced by the new image
+        auto const cached = [&] { return CachedPixels() - own; };
+        while (cached() + wanted > budget)
         {
             auto const victim = m_lru.OldestIf([&](uint32_t k) { return k != index && !isVisible(k); });
             if (!victim)
@@ -523,12 +543,22 @@ namespace fastlook::viewer
             }
             Evict(*victim);
         }
-        uint64_t const used = CachedPixels();
+        uint64_t const used = cached();
         if (used + wanted > budget)
         {
             wanted = std::max<uint64_t>(static_cast<uint64_t>(kFloorPixels), budget > used ? budget - used : 0);
         }
         return wanted;
+    }
+
+    // Drops the render in flight for the page; the page leaves the LRU unless an older image of it is still cached.
+    void PdfPreviewer::ReleaseReservation(uint32_t index)
+    {
+        m_rendering.erase(index);
+        if (!m_rendered.contains(index))
+        {
+            m_lru.Erase(index);
+        }
     }
 
     void PdfPreviewer::Evict(uint32_t index)
@@ -595,8 +625,7 @@ namespace fastlook::viewer
         auto const abandon = [&self, index, &current] {
             if (current())
             {
-                self->m_rendering.erase(index);
-                self->m_lru.Erase(index);
+                self->ReleaseReservation(index);
                 self->PumpRenders();
             }
         };
@@ -671,7 +700,15 @@ namespace fastlook::viewer
             }
 
             self->m_rendering.erase(index);
-            self->m_rendered[index] = Rendered{source, px};
+            if (auto old = self->m_rendered.find(index); old != self->m_rendered.end())
+            {
+                CloseQuietly(old->second.source);
+                old->second = Rendered{source, px};
+            }
+            else
+            {
+                self->m_rendered.emplace(index, Rendered{source, px});
+            }
             core::perf::Mark("pdf-page-rendered", "page=" + std::to_string(index) + " w=" + std::to_string(widthPx));
             if (auto realized = self->m_realized.find(index); realized != self->m_realized.end())
             {
@@ -684,7 +721,18 @@ namespace fastlook::viewer
         }
         catch (winrt::hresult_canceled const&)
         {
-            // Cancelled by an eviction, a rebuild or Unload: whoever cancelled already dropped the reservation.
+            // Cancelled: normally by an eviction, a rebuild or Unload, which already dropped the reservation. If the operation
+            // was cancelled from outside, release it here so it can never pin budget; the page may render again.
+            ui.TryEnqueue([self, index, generation, id] {
+                if (generation == self->m_generation && self->m_loaded)
+                {
+                    if (auto it = self->m_rendering.find(index); it != self->m_rendering.end() && it->second.id == id)
+                    {
+                        self->ReleaseReservation(index);
+                        self->PumpRenders();
+                    }
+                }
+            });
         }
         catch (...)
         {
@@ -695,8 +743,7 @@ namespace fastlook::viewer
                 {
                     if (auto it = self->m_rendering.find(index); it != self->m_rendering.end() && it->second.id == id)
                     {
-                        self->m_rendering.erase(it);
-                        self->m_lru.Erase(index);
+                        self->ReleaseReservation(index);
                         self->m_failed.insert(index);
                         self->PumpRenders();
                     }
