@@ -81,6 +81,14 @@ namespace fastlook::daemon
         return m_stale && m_pingSentMs != 0 && m_lastHeardMs.load() < m_pingSentMs;
     }
 
+    void ViewerManager::TerminateNow()
+    {
+        if (m_job)
+        {
+            TerminateJobObject(m_job, 1);
+        }
+    }
+
     void ViewerManager::ResetConnection()
     {
         if (m_readerStop)

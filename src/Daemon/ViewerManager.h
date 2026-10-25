@@ -40,6 +40,8 @@ namespace fastlook::daemon
         void Heartbeat();
         bool IsRunning() const;
         bool IsStale() const;
+        // Kills the Viewer through its Job object without touching any state: safe while the controller thread is stuck.
+        void TerminateNow();
         // `shutdown`, waits `grace` for the process, then terminates it.
         void Shutdown(std::chrono::milliseconds grace = std::chrono::milliseconds(2000));
 

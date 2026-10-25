@@ -5,6 +5,8 @@
 #include <format>
 #include <iterator>
 
+#include <shellapi.h>
+
 #include "DaemonApp.h"
 #include "Diagnostics/Log.h"
 #include "Diagnostics/PerfLog.h"
@@ -130,11 +132,17 @@ namespace fastlook::daemon
         }
         else
         {
-            // A stuck pipe or shell call: members cannot be destroyed under the running thread. The process ends here;
-            // the Job object takes the Viewer down.
+            // A stuck pipe or shell call: members cannot be destroyed under the running thread, and ExitProcess would
+            // run DLL detach with that thread frozen mid-call. Clean up what is visible, then end the process.
             lock.unlock();
-            FL_LOG_INFO(L"controller thread did not stop in time, exiting");
-            ExitProcess(0);
+            FL_LOG_INFO(L"controller thread did not stop in time, terminating");
+            NOTIFYICONDATAW tray{};
+            tray.cbSize = sizeof(tray);
+            tray.hWnd = m_main;
+            tray.uID = 1; // Tray.cpp kTrayId
+            Shell_NotifyIconW(NIM_DELETE, &tray);
+            m_viewer->TerminateNow();
+            TerminateProcess(GetCurrentProcess(), 0);
         }
     }
 
@@ -246,7 +254,7 @@ namespace fastlook::daemon
         toggle.show.listComplete = plan->listComplete;
         auto ack = m_viewer->Deliver(std::move(toggle));
         LogAck(L"toggle_acked", ack);
-        if (!ack || !ack->shown || plan->listComplete || plan->index >= plan->items.size() || !m_viewer->IsRunning())
+        if (!ack || !ack->shown || plan->listComplete || plan->index >= plan->items.size())
         {
             return;
         }
@@ -264,6 +272,10 @@ namespace fastlook::daemon
         {
             FL_LOG_INFO(L"folder list dropped: newer trigger");
             return;
+        }
+        if (!m_viewer->IsRunning())
+        {
+            return; // died meanwhile: do not launch a Viewer just for a folder list
         }
         Message items;
         items.type = MsgType::Items;
