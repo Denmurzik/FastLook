@@ -1,5 +1,6 @@
 #include <Windows.h>
 
+#include <cstring>
 #include <stop_token>
 
 #include "TestUtil.h"
@@ -168,4 +169,82 @@ TEST(TextDocument, BuildIndexIsChunkedStoppableAndResumable)
     EXPECT_TRUE(completes.back());
     EXPECT_EQ(doc->LineCount(), data.size() / row.size() + 1);
     EXPECT_EQ(doc->LineText(doc->LineCount() - 2), L"0123456789abcdef");
+}
+
+TEST(TextDocument, CrLfFixtureHasRealCrLfBytes)
+{
+    auto doc = OpenIndexed(FixturePath("text/crlf.txt"));
+    ASSERT_TRUE(doc);
+    EXPECT_EQ(doc->SizeBytes(), 17u); // "one\r\ntwo\r\nthree\r\n"
+    EXPECT_EQ(doc->LineCount(), 4u);
+    EXPECT_EQ(doc->LineText(0), L"one");
+    EXPECT_EQ(doc->LineText(2), L"three");
+    EXPECT_EQ(doc->LineText(3), L"");
+    EXPECT_EQ(doc->ExtractRange({0, 0}, {1, 3}), L"one\r\ntwo");
+}
+
+TEST(TextDocument, UnreadableMappingFaultsInsteadOfCrashing)
+{
+    struct Region
+    {
+        uint8_t* p = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+        ~Region() { VirtualFree(p, 0, MEM_RELEASE); }
+    } region;
+    ASSERT_NE(region.p, nullptr);
+    std::string text = "first\nsecond\nthird";
+    memcpy(region.p, text.data(), text.size());
+    auto doc = TextDocument::OpenView({region.p, text.size()});
+    ASSERT_TRUE(doc);
+    doc->BuildIndex({}, {});
+    ASSERT_TRUE(doc->IndexComplete());
+    EXPECT_EQ(doc->LineText(1), L"second");
+    EXPECT_FALSE(doc->Faulted());
+
+    DWORD old;
+    ASSERT_TRUE(VirtualProtect(region.p, 4096, PAGE_NOACCESS, &old)); // what a truncated mapping looks like
+    EXPECT_EQ(doc->LineText(1), L"");
+    EXPECT_TRUE(doc->Faulted());
+    EXPECT_EQ(doc->ExtractRange({0, 0}, {2, 5}), L"");
+}
+
+TEST(TextDocument, BuildIndexOnUnreadableMappingStopsFaulted)
+{
+    uint8_t* p = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+    ASSERT_NE(p, nullptr);
+    memset(p, 'a', 4096);
+    auto doc = TextDocument::OpenView({p, 4096});
+    ASSERT_TRUE(doc);
+    DWORD old;
+    VirtualProtect(p, 4096, PAGE_NOACCESS, &old);
+    bool progressed = false;
+    doc->BuildIndex({}, [&](uint64_t, bool) { progressed = true; });
+    EXPECT_TRUE(doc->Faulted());
+    EXPECT_FALSE(doc->IndexComplete());
+    EXPECT_FALSE(progressed);
+    VirtualFree(p, 0, MEM_RELEASE);
+}
+
+TEST(TextDocument, OpenOnUnreadableFirstPageFails)
+{
+    uint8_t* p = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_NOACCESS));
+    ASSERT_NE(p, nullptr);
+    EXPECT_EQ(TextDocument::OpenView({p, 4096}), nullptr);
+    VirtualFree(p, 0, MEM_RELEASE);
+}
+
+TEST(TextDocument, TruncatingAMappedFileEitherIsRefusedOrFaultsCleanly)
+{
+    auto f = MakeTempDir() / "trunc.txt";
+    WriteFile(f, std::string(200000, 'a') + "\nend");
+    auto doc = OpenIndexed(f);
+    ASSERT_TRUE(doc);
+    HANDLE h = CreateFileW(f.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, nullptr);
+    ASSERT_NE(h, INVALID_HANDLE_VALUE);
+    LARGE_INTEGER zero{};
+    bool truncated = SetFilePointerEx(h, zero, nullptr, FILE_BEGIN) && SetEndOfFile(h); // NTFS refuses while mapped
+    CloseHandle(h);
+    auto text = doc->LineText(doc->LineCount() - 1); // must not crash either way
+    if (truncated) EXPECT_TRUE(doc->Faulted() || text == L"end");
+    else EXPECT_TRUE(text == L"end");
 }
