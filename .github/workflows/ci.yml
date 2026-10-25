@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: windows-2025
+    env:
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\out\vcpkg-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create vcpkg binary cache folder
+        shell: pwsh
+        run: New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~\.nuget\packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.vcxproj') }}
+          restore-keys: nuget-${{ runner.os }}-
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: out\vcpkg-cache
+          key: vcpkg-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: vcpkg-${{ runner.os }}-
+
+      - name: Build
+        shell: pwsh
+        run: scripts/build.ps1 -Configuration Release
+
+      # E2E/GUI tests skip themselves (FASTLOOK_E2E is unset).
+      - name: Unit tests
+        shell: pwsh
+        run: scripts/test.ps1 -NoBuild
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: out/test-results.xml
+          if-no-files-found: ignore
+
+      - name: Upload binlog
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: msbuild-binlog
+          path: out/*.binlog
+          if-no-files-found: ignore
