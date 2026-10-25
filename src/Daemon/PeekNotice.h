@@ -5,7 +5,9 @@
 
 namespace fastlook::daemon
 {
-    // Shows the PowerToys Peek balloon when Peek is enabled on our activation key and the user wants the warning.
-    // Returns true when a conflict was detected (the balloon was shown). Reads PowerToys settings only.
-    bool ShowPeekNoticeIfConflicting(core::Settings const& settings, Tray& tray);
+    // True (and logged) when the user wants the warning and PowerToys Peek is enabled on our activation key.
+    // Reads PowerToys settings only.
+    bool DetectPeekConflict(core::Settings const& settings);
+    // Shows the Peek balloon; the tray icon must already be added.
+    void ShowPeekNotice(Tray& tray);
 }

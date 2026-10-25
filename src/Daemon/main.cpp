@@ -49,9 +49,16 @@ namespace
                result != 0;
     }
 
+    // The daemon may hold its mutex before it has created its window, so retry only when an instance exists.
     int Shutdown()
     {
-        HWND const wnd = FindDaemonWindow(0);
+        HANDLE const mutex = OpenMutexW(SYNCHRONIZE, FALSE, daemon::kMutexName);
+        bool const instanceExists = mutex != nullptr;
+        if (mutex)
+        {
+            CloseHandle(mutex);
+        }
+        HWND const wnd = FindDaemonWindow(instanceExists ? kFindRetries : 0);
         if (!wnd)
         {
             return 0;
@@ -60,13 +67,23 @@ namespace
         GetWindowThreadProcessId(wnd, &pid);
         HANDLE const process = pid ? OpenProcess(SYNCHRONIZE, FALSE, pid) : nullptr;
         Forward(wnd, daemon::kCopyShutdown);
-        int code = 0;
         if (process)
         {
-            code = WaitForSingleObject(process, kShutdownWaitMs) == WAIT_OBJECT_0 ? 0 : 1;
+            bool const gone = WaitForSingleObject(process, kShutdownWaitMs) == WAIT_OBJECT_0;
             CloseHandle(process);
+            return gone ? 0 : 1;
         }
-        return code;
+        // No handle to wait on: wait for the window to disappear instead.
+        ULONGLONG const deadline = GetTickCount64() + kShutdownWaitMs;
+        while (IsWindow(wnd))
+        {
+            if (GetTickCount64() >= deadline)
+            {
+                return 1;
+            }
+            Sleep(50);
+        }
+        return 0;
     }
 }
 
@@ -90,6 +107,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int)
     case core::DaemonCommand::Show:
     case core::DaemonCommand::Toggle:
     {
+        if (args.showPath.empty())
+        {
+            code = 1; // malformed: no path
+            break;
+        }
         HWND const wnd = FindDaemonWindow(kFindRetries);
         bool const show = args.command == core::DaemonCommand::Show;
         code = wnd && Forward(wnd, show ? daemon::kCopyShow : daemon::kCopyToggle, args.showPath) ? 0 : 1;

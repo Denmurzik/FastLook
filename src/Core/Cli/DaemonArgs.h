@@ -17,7 +17,7 @@ namespace fastlook::core
     struct DaemonArgs
     {
         DaemonCommand command = DaemonCommand::Run;
-        std::wstring showPath; // --show and --toggle
+        std::wstring showPath; // --show and --toggle; empty when the path is missing (malformed)
         bool warm = false;
         std::wstring perfLog;
     };

@@ -6,7 +6,7 @@
 
 namespace fastlook::daemon
 {
-    bool ShowPeekNoticeIfConflicting(core::Settings const& settings, Tray& tray)
+    bool DetectPeekConflict(core::Settings const& settings)
     {
         if (!settings.general.peekWarning)
         {
@@ -17,7 +17,11 @@ namespace fastlook::daemon
             return false;
         }
         FL_LOG_INFO(L"peek conflict");
-        tray.ShowBalloon(S(StrId::PeekTitle), S(StrId::PeekText));
         return true;
+    }
+
+    void ShowPeekNotice(Tray& tray)
+    {
+        tray.ShowBalloon(S(StrId::PeekTitle), S(StrId::PeekText));
     }
 }

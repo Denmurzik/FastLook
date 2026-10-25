@@ -21,10 +21,12 @@ TEST(DaemonArgs, Commands)
     EXPECT_EQ(tr.showPath, L"C:\\x.txt");
 }
 
-TEST(DaemonArgs, MissingValuesAreIgnored)
+TEST(DaemonArgs, MissingValues)
 {
     std::wstring_view a[] = {L"--show"};
-    EXPECT_EQ(ParseDaemonArgs(a).command, DaemonCommand::Run);
+    auto r = ParseDaemonArgs(a);
+    EXPECT_EQ(r.command, DaemonCommand::Show);
+    EXPECT_TRUE(r.showPath.empty());
     std::wstring_view b[] = {L"--perf-log"};
     EXPECT_TRUE(ParseDaemonArgs(b).perfLog.empty());
 }

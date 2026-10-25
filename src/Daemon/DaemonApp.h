@@ -47,11 +47,15 @@ namespace fastlook::daemon
         void ReloadSettings();
         core::hook::HookConfig MakeHookConfig() const;
         void Exit();
+        void AddTray();
 
         HWND m_wnd = nullptr;
         UINT m_taskbarCreated = 0;
         bool m_paused = false;
         bool m_exiting = false;
+        bool m_peekPending = false;
+        bool m_trayRetrying = false;
+        int m_trayRetries = 0;
         core::Settings m_settings;
         Tray m_tray;
         HookThread m_hook;

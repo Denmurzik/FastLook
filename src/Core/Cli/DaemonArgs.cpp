@@ -14,11 +14,8 @@ namespace fastlook::core
             }
             else if (a == L"--show" || a == L"--toggle")
             {
-                if (i + 1 < args.size())
-                {
-                    r.command = a == L"--show" ? DaemonCommand::Show : DaemonCommand::Toggle;
-                    r.showPath = args[++i];
-                }
+                r.command = a == L"--show" ? DaemonCommand::Show : DaemonCommand::Toggle;
+                r.showPath = i + 1 < args.size() ? args[++i] : std::wstring_view{};
             }
             else if (a == L"--warm")
             {

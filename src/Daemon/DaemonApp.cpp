@@ -18,6 +18,10 @@ namespace fastlook::daemon
     {
         constexpr UINT_PTR kWatchdogTimer = 1;
         constexpr UINT kWatchdogIntervalMs = 1000;
+        // Explorer may not have created the notification area yet (autostart at logon).
+        constexpr UINT_PTR kTrayRetryTimer = 2;
+        constexpr UINT kTrayRetryIntervalMs = 2000;
+        constexpr int kTrayRetryMax = 30;
         constexpr DWORD kMaxCopyPathBytes = 64 * 1024;
 
         // Payload is a UTF-16 path, possibly NUL-terminated.
@@ -53,6 +57,14 @@ namespace fastlook::daemon
         }
         FL_LOG_INFO(L"daemon start");
         SetLanguage(m_settings.general.language);
+        if (doc.readFailed)
+        {
+            FL_LOG_INFO(L"settings file could not be read, using defaults without saving");
+        }
+        else if (doc.recoveredFromCorrupt)
+        {
+            FL_LOG_INFO(L"settings file was corrupt, backed up and reset to defaults");
+        }
 
         HINSTANCE const inst = GetModuleHandleW(nullptr);
         WNDCLASSEXW wc{};
@@ -74,14 +86,14 @@ namespace fastlook::daemon
             return 1;
         }
 
-        m_tray.Add(m_wnd, WM_FL_TRAY);
+        m_peekPending = DetectPeekConflict(m_settings);
+        AddTray();
         WTSRegisterSessionNotification(m_wnd, NOTIFY_FOR_THIS_SESSION);
         HPOWERNOTIFY const powerNotify = RegisterSuspendResumeNotification(m_wnd, DEVICE_NOTIFY_WINDOW_HANDLE);
         SetTimer(m_wnd, kWatchdogTimer, kWatchdogIntervalMs, nullptr);
 
         m_hook.Start(m_wnd, MakeHookConfig());
         m_controller.Start(m_wnd, m_settings, args.warm);
-        ShowPeekNoticeIfConflicting(m_settings, m_tray);
 
         MSG msg;
         while (GetMessageW(&msg, nullptr, 0, 0) > 0)
@@ -100,6 +112,29 @@ namespace fastlook::daemon
         return 0;
     }
 
+    void DaemonApp::AddTray()
+    {
+        if (m_tray.Add(m_wnd, WM_FL_TRAY))
+        {
+            if (m_trayRetrying)
+            {
+                KillTimer(m_wnd, kTrayRetryTimer);
+                m_trayRetrying = false;
+            }
+            if (m_peekPending)
+            {
+                m_peekPending = false;
+                ShowPeekNotice(m_tray);
+            }
+        }
+        else if (!m_trayRetrying)
+        {
+            m_trayRetrying = true;
+            m_trayRetries = 0;
+            SetTimer(m_wnd, kTrayRetryTimer, kTrayRetryIntervalMs, nullptr);
+        }
+    }
+
     core::hook::HookConfig DaemonApp::MakeHookConfig() const
     {
         core::hook::HookConfig c;
@@ -112,6 +147,10 @@ namespace fastlook::daemon
     void DaemonApp::ReloadSettings()
     {
         auto doc = core::LoadSettings(core::CurrentAppPaths().settingsFile);
+        if (doc.recoveredFromCorrupt)
+        {
+            FL_LOG_INFO(L"settings file was corrupt, backed up and reset to defaults");
+        }
         if (doc.readFailed)
         {
             FL_LOG_INFO(L"settings reload failed, keeping previous values");
@@ -133,6 +172,7 @@ namespace fastlook::daemon
         }
         m_exiting = true;
         KillTimer(m_wnd, kWatchdogTimer);
+        KillTimer(m_wnd, kTrayRetryTimer);
         m_controller.Shutdown();
         m_hook.Stop();
         m_tray.Remove();
@@ -209,7 +249,7 @@ namespace fastlook::daemon
     {
         if (m_taskbarCreated != 0 && msg == m_taskbarCreated)
         {
-            m_tray.Add(wnd, WM_FL_TRAY);
+            AddTray();
             m_hook.Rehook("taskbar");
             return 0;
         }
@@ -257,6 +297,19 @@ namespace fastlook::daemon
             if (wParam == kWatchdogTimer)
             {
                 m_hook.CheckWatchdog();
+            }
+            else if (wParam == kTrayRetryTimer && m_trayRetrying)
+            {
+                if (++m_trayRetries > kTrayRetryMax)
+                {
+                    KillTimer(wnd, kTrayRetryTimer);
+                    m_trayRetrying = false;
+                    FL_LOG_INFO(L"tray add gave up");
+                }
+                else
+                {
+                    AddTray();
+                }
             }
             return 0;
         case WM_ENDSESSION:

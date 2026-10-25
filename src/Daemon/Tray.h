@@ -21,6 +21,7 @@ namespace fastlook::daemon
         // NIM_ADD; also used to re-add the icon after Explorer restarts (TaskbarCreated).
         bool Add(HWND wnd, UINT callbackMsg);
         void Remove();
+        bool IsAdded() const { return m_added; }
         void SetPaused(bool paused);
         void ShowBalloon(std::wstring_view title, std::wstring_view text);
         // Menu choices arrive as WM_COMMAND (TrayCommand) on `wnd`.
