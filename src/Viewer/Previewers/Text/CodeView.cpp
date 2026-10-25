@@ -6,7 +6,10 @@
 
 #include <winrt/Windows.UI.h>
 
+#include <chrono>
+
 #include "Diagnostics/Log.h"
+#include "Diagnostics/PerfLog.h"
 #include "Graphics/DeviceResources.h"
 #include "Util/Str.h"
 
@@ -77,8 +80,16 @@ namespace fastlook::viewer
 
     namespace
     {
-        // VS Code "Light+" / "Dark+" inspired.
-        CodeView::Palette const& PaletteFor(bool dark)
+        winrt::Windows::UI::Color ToXaml(D2D1_COLOR_F c)
+        {
+            auto byte = [](float v) { return static_cast<uint8_t>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); };
+            return {255, byte(c.r), byte(c.g), byte(c.b)};
+        }
+    }
+
+    // VS Code "Light+" / "Dark+" inspired.
+    CodeView::Palette const& CodeView::PaletteFor(bool dark)
+    {
         {
             static CodeView::Palette const light{
                 Rgb(0xFFFFFF), Rgb(0x1F1F1F), Rgb(0xF3F3F3), Rgb(0x8A8A8A), Rgb(0xE0E0E0), Rgb(0xADD6FF),
@@ -87,12 +98,6 @@ namespace fastlook::viewer
                 Rgb(0x1E1E1E), Rgb(0xD4D4D4), Rgb(0x252526), Rgb(0x858585), Rgb(0x333333), Rgb(0x264F78),
                 {Rgb(0xD4D4D4), Rgb(0x6A9955), Rgb(0xCE9178), Rgb(0xB5CEA8), Rgb(0x569CD6), Rgb(0xC586C0), Rgb(0xD4D4D4), Rgb(0x9CDCFE), Rgb(0xF44747)}};
             return dark ? darkPalette : light;
-        }
-
-        winrt::Windows::UI::Color ToXaml(D2D1_COLOR_F c)
-        {
-            auto byte = [](float v) { return static_cast<uint8_t>(std::lround(std::clamp(v, 0.0f, 1.0f) * 255.0f)); };
-            return {255, byte(c.r), byte(c.g), byte(c.b)};
         }
     }
 
@@ -114,11 +119,9 @@ namespace fastlook::viewer
             std::lock_guard lock{m_gate->mutex};
             m_gate->view = nullptr;
         }
-        if (m_styler)
-        {
-            m_styler->invalidated = nullptr;
-        }
         m_hostSize.revoke();
+        m_themeChanged.revoke();
+        m_contentsLost.revoke();
         m_loaded.revoke();
         m_wheel.revoke();
         m_rootChanged.revoke();
@@ -130,6 +133,7 @@ namespace fastlook::viewer
         }
         m_native = nullptr;
         m_surface = nullptr;
+        m_d3d = nullptr;
     }
 
     UIElement CodeView::Root()
@@ -189,6 +193,18 @@ namespace fastlook::viewer
         m_wheel = m_root.PointerWheelChanged(winrt::auto_revoke, [this](auto const&, winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& e) {
             OnWheel(e);
         });
+        m_themeChanged = m_root.ActualThemeChanged(winrt::auto_revoke, [this](auto const&, auto const&) {
+            SetDark(m_root.ActualTheme() == ElementTheme::Dark);
+        });
+        // The compositor lost the surface contents (device reset, sleep/resume, RDP): our own device is usually fine, so no draw
+        // error would ever tell us.
+        m_contentsLost = winrt::Microsoft::UI::Xaml::Media::CompositionTarget::SurfaceContentsLost(winrt::auto_revoke, [this](auto const&, auto const&) {
+            m_d3d = nullptr;
+            if (m_surface && RecreateSurface())
+            {
+                Invalidate();
+            }
+        });
         m_vChanged = m_vbar.ValueChanged(winrt::auto_revoke, [this](auto const&, auto const& e) {
             if (!m_updatingBars)
             {
@@ -208,10 +224,6 @@ namespace fastlook::viewer
 
     void CodeView::SetStyler(std::shared_ptr<ILineStyler> styler)
     {
-        if (m_styler)
-        {
-            m_styler->invalidated = nullptr;
-        }
         m_styler = std::move(styler);
         if (m_styler)
         {
@@ -228,16 +240,12 @@ namespace fastlook::viewer
     void CodeView::SetFontSize(float dip)
     {
         m_baseFontSize = std::clamp(dip, kMinFontSize, kMaxFontSize);
-        m_fontSize = m_baseFontSize;
-        m_maxLineW = 0;
-        RebuildFormat();
-        UpdateBars();
-        Invalidate();
+        SetZoomedSize(m_baseFontSize);
     }
 
-    void CodeView::ZoomBy(float factor)
+    void CodeView::SetZoomedSize(float dip)
     {
-        float const size = std::clamp(m_fontSize * factor, kMinFontSize, kMaxFontSize);
+        float const size = std::clamp(dip, kMinFontSize, kMaxFontSize);
         if (size == m_fontSize)
         {
             return;
@@ -249,12 +257,19 @@ namespace fastlook::viewer
         Invalidate();
     }
 
+    void CodeView::ZoomSteps(int steps)
+    {
+        SetZoomedSize(m_fontSize + static_cast<float>(steps));
+    }
+
+    void CodeView::ZoomBy(float factor)
+    {
+        SetZoomedSize(m_fontSize * factor);
+    }
+
     void CodeView::ResetZoom()
     {
-        if (m_fontSize != m_baseFontSize)
-        {
-            ZoomBy(m_baseFontSize / m_fontSize);
-        }
+        SetZoomedSize(m_baseFontSize);
     }
 
     void CodeView::SetDark(bool dark)
@@ -315,7 +330,7 @@ namespace fastlook::viewer
             Invalidate();
             return true;
         case VirtualKey::End:
-            ScrollTo(MaxTop());
+            ScrollTo(MaxTop(), true);
             return true;
         default:
             return false;
@@ -335,10 +350,14 @@ namespace fastlook::viewer
         {
             return;
         }
-        bool const touchesScreen = previous < m_top + VisibleRows() + 1;
+        bool const touchesScreen = m_followEnd || previous < m_top + VisibleRows() + 1;
         if (touchesScreen)
         {
             m_cacheValid = false;
+        }
+        if (m_followEnd)
+        {
+            m_top = MaxTop();
         }
         UpdateBars();
         if (touchesScreen || GutterWidth() != gutterBefore)
@@ -387,7 +406,6 @@ namespace fastlook::viewer
                                lineMetrics.baseline + static_cast<float>(m_lineH - lineMetrics.height) / 2.0f);
         format->SetIncrementalTabStop(static_cast<float>(m_charW * 4));
         m_format = std::move(format);
-        m_cacheValid = false;
     }
 
     uint64_t CodeView::VisibleRows() const
@@ -454,8 +472,9 @@ namespace fastlook::viewer
         ScrollTo(static_cast<uint64_t>(target));
     }
 
-    void CodeView::ScrollTo(uint64_t top)
+    void CodeView::ScrollTo(uint64_t top, bool followEnd)
     {
+        m_followEnd = followEnd;
         top = std::min(top, MaxTop());
         if (top == m_top)
         {
@@ -492,7 +511,7 @@ namespace fastlook::viewer
         bool const shift = (modifiers & VirtualKeyModifiers::Shift) != VirtualKeyModifiers::None;
         if (ctrl)
         {
-            ZoomBy(notches > 0 ? 1.1f : 1.0f / 1.1f);
+            ZoomSteps(notches > 0 ? 1 : -1);
         }
         else if (properties.IsHorizontalMouseWheel())
         {
@@ -563,7 +582,7 @@ namespace fastlook::viewer
         {
             m_surface = winrt::Microsoft::UI::Xaml::Media::Imaging::SurfaceImageSource(static_cast<int>(m_pxW), static_cast<int>(m_pxH), true);
             m_native = m_surface.as<ISurfaceImageSourceNative>();
-            m_deviceKey = nullptr;
+            m_d3d = nullptr;
             m_image.Source(m_surface);
             return true;
         }
@@ -617,11 +636,23 @@ namespace fastlook::viewer
         {
             return;
         }
-        m_cache.assign(static_cast<size_t>(count), {});
+        // Scrolling keeps the rows that stay on screen: each fetch rescans from the nearest index checkpoint, which on a
+        // minified single line is up to ~1 MiB per row.
+        std::vector<Row> rows(static_cast<size_t>(count));
         for (uint64_t i = 0; i < count; ++i)
         {
-            m_cache[static_cast<size_t>(i)] = m_doc->LineText(first + i); // guarded: empty once the file is faulted
+            uint64_t const line = first + i;
+            Row& row = rows[static_cast<size_t>(i)];
+            if (m_cacheValid && line >= m_cacheFirst && line - m_cacheFirst < m_cache.size())
+            {
+                row = std::move(m_cache[static_cast<size_t>(line - m_cacheFirst)]);
+            }
+            else if (!m_doc->LineText(line, row.text, row.continuation)) // guarded: false once the file is faulted
+            {
+                break;
+            }
         }
+        m_cache = std::move(rows);
         m_cacheFirst = first;
         m_cacheValid = true;
     }
@@ -633,25 +664,25 @@ namespace fastlook::viewer
             return;
         }
         auto& devices = DeviceResources::Get();
-        ID3D11Device* d3d = devices.D3D();
-        ID2D1Device5* d2d = devices.D2DDevice();
-        if (d3d == nullptr || d2d == nullptr)
+        auto const started = std::chrono::steady_clock::now();
+        // Own references, taken at once: DeviceResources may release its own at any time (idle trim on this thread).
+        winrt::com_ptr<ID3D11Device> d3d;
+        d3d.copy_from(devices.D3D());
+        winrt::com_ptr<ID2D1Device5> d2dRef;
+        d2dRef.copy_from(devices.D2DDevice());
+        if (!d3d || !d2dRef)
         {
             return;
         }
-        if (d3d != m_deviceKey)
+        if (d3d != m_d3d)
         {
-            winrt::com_ptr<ID3D11Device> d3dRef;
-            d3dRef.copy_from(d3d);
-            auto const dxgi = d3dRef.as<IDXGIDevice>();
+            auto const dxgi = d3d.as<IDXGIDevice>();
             if (FAILED(m_native->SetDevice(dxgi.get())))
             {
                 return;
             }
-            m_deviceKey = d3d;
+            m_d3d = d3d;
         }
-        winrt::com_ptr<ID2D1Device5> d2dRef;
-        d2dRef.copy_from(d2d);
 
         RECT const update{0, 0, static_cast<LONG>(m_pxW), static_cast<LONG>(m_pxH)};
         winrt::com_ptr<IDXGISurface> surface;
@@ -709,7 +740,12 @@ namespace fastlook::viewer
                 dc->SetTarget(nullptr);
             }
         }
-        m_native->EndDraw();
+        HRESULT const endHr = m_native->EndDraw();
+        if (IsDeviceLoss(endHr))
+        {
+            RecoverFromDeviceLoss(endHr);
+            return;
+        }
 
         if (IsDeviceLoss(hr))
         {
@@ -721,12 +757,17 @@ namespace fastlook::viewer
             FL_LOG_INFO(L"CodeView: drawing failed: 0x{:08X}", static_cast<uint32_t>(hr));
         }
         UpdateBars(); // the widest line seen so far may have grown
+        auto const ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
+        if (ms >= 8)
+        {
+            core::perf::Mark("codeview_slow_draw", "ms=" + std::to_string(ms));
+        }
     }
 
     void CodeView::RecoverFromDeviceLoss(HRESULT hr)
     {
         DeviceResources::Get().HandleDeviceLost(hr);
-        m_deviceKey = nullptr;
+        m_d3d = nullptr;
         if (!std::exchange(m_retriedAfterLoss, true))
         {
             RecreateSurface();
@@ -756,7 +797,7 @@ namespace fastlook::viewer
         std::vector<StyledRun> runs;
         for (uint64_t i = 0; i < count; ++i)
         {
-            std::wstring const& text = m_cache[static_cast<size_t>(i)];
+            std::wstring const& text = m_cache[static_cast<size_t>(i)].text;
             if (text.empty())
             {
                 continue;
@@ -827,6 +868,10 @@ namespace fastlook::viewer
         dc->FillRectangle(D2D1::RectF(width - hairline, 0, width, static_cast<float>(m_viewH)), frame.separator.get());
         for (uint64_t i = 0; i < count; ++i)
         {
+            if (m_cache[static_cast<size_t>(i)].continuation)
+            {
+                continue; // a 16 384-unit split of a longer line is a storage artifact, not a line
+            }
             std::wstring const number = std::to_wstring(first + i + 1);
             winrt::com_ptr<IDWriteTextLayout> layout;
             if (FAILED(m_dwrite->CreateTextLayout(number.c_str(), static_cast<UINT32>(number.size()), m_format.get(), 1000.0f,

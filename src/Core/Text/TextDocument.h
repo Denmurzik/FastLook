@@ -52,6 +52,8 @@ namespace fastlook::core
         bool Faulted() const { return faulted_; }
 
         std::wstring LineText(uint64_t line) const;                // decoded, no EOL
+        // Same, and reports whether the row is a continuation segment of a longer line. False when the file faulted.
+        bool LineText(uint64_t line, std::wstring& text, bool& continuation) const { return ReadLine(line, text, continuation); }
         std::wstring ExtractRange(TextPos from, TextPos to) const; // lines joined with L"\r\n", continuation segments joined directly
         LineIndex const& Index() const { return index_; }          // Line()/LineFromOffset() on it scan Content() unguarded
 

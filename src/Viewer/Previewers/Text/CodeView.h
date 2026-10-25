@@ -9,6 +9,7 @@
 #include <winrt/Microsoft.UI.Dispatching.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Controls.Primitives.h>
+#include <winrt/Microsoft.UI.Xaml.Media.h>
 #include <winrt/Microsoft.UI.Xaml.Media.Imaging.h>
 #include <winrt/Windows.System.h>
 
@@ -34,12 +35,15 @@ namespace fastlook::viewer
         winrt::Microsoft::UI::Xaml::UIElement Root();
 
         // May be called with null (no highlighting). The styler's `invalidated` callback is set here; it may fire on any thread.
+        // Call before the styler starts its worker: `invalidated` is assigned here and never touched again (a stale one only
+        // reaches the redraw gate, which is harmless).
         void SetStyler(std::shared_ptr<ILineStyler> styler);
         void SetWrap(bool wrap);
         bool Wrap() const { return m_wrap; }
         void SetFontSize(float dip); // also the size ResetZoom returns to
         float FontSize() const { return m_fontSize; }
         void SetDark(bool dark);
+        void ZoomSteps(int steps); // +-1 DIP per step
         void ZoomBy(float factor);
         void ResetZoom();
 
@@ -53,10 +57,14 @@ namespace fastlook::viewer
         // UI thread: the line index grew (or finished).
         void OnIndexProgress(uint64_t lines, bool complete);
 
-        struct Palette; // internal to CodeView.cpp
-        struct Frame;
-
     private:
+        struct Palette;
+        struct Frame;
+        struct Row
+        {
+            std::wstring text;
+            bool continuation = false;
+        };
         struct RedrawGate
         {
             std::mutex mutex;
@@ -69,6 +77,8 @@ namespace fastlook::viewer
         void Invalidate(); // any thread
         static void Invalidate(std::shared_ptr<RedrawGate> const& gate);
 
+        static Palette const& PaletteFor(bool dark);
+        void SetZoomedSize(float dip);
         void RebuildFormat();
         void OnHostSizeChanged();
         bool RecreateSurface();
@@ -84,7 +94,7 @@ namespace fastlook::viewer
         double GutterWidth(); // also grows the (never shrinking) digit count
         double HorizontalMax();
         void ScrollLines(int64_t delta);
-        void ScrollTo(uint64_t top);
+        void ScrollTo(uint64_t top, bool followEnd = false);
         void ScrollHorizontal(double deltaDip);
         void UpdateBars();
         void OnWheel(winrt::Microsoft::UI::Xaml::Input::PointerRoutedEventArgs const& e);
@@ -106,13 +116,15 @@ namespace fastlook::viewer
         winrt::Microsoft::UI::Xaml::FrameworkElement::Loaded_revoker m_loaded;
         winrt::Microsoft::UI::Xaml::UIElement::PointerWheelChanged_revoker m_wheel;
         winrt::Microsoft::UI::Xaml::XamlRoot::Changed_revoker m_rootChanged;
+        winrt::Microsoft::UI::Xaml::FrameworkElement::ActualThemeChanged_revoker m_themeChanged;
+        winrt::Microsoft::UI::Xaml::Media::CompositionTarget::SurfaceContentsLost_revoker m_contentsLost;
         winrt::Microsoft::UI::Xaml::Controls::Primitives::RangeBase::ValueChanged_revoker m_vChanged;
         winrt::Microsoft::UI::Xaml::Controls::Primitives::RangeBase::ValueChanged_revoker m_hChanged;
 
         // Surface.
         winrt::Microsoft::UI::Xaml::Media::Imaging::SurfaceImageSource m_surface{nullptr};
         winrt::com_ptr<ISurfaceImageSourceNative> m_native;
-        void* m_deviceKey = nullptr;         // the D3D device the surface was bound to
+        winrt::com_ptr<ID3D11Device> m_d3d;  // the device the surface was bound to (held, so its address cannot be reused)
         uint32_t m_pxW = 0, m_pxH = 0;
         double m_scale = 1.0;
         double m_viewW = 0, m_viewH = 0; // DIP, the image's size
@@ -131,10 +143,11 @@ namespace fastlook::viewer
         uint32_t m_gutterDigits = 3;
         double m_wheelRemainder = 0;
         bool m_updatingBars = false;
+        bool m_followEnd = false; // End was pressed: stay at the bottom while the index grows
 
         // Text of the lines on screen.
         uint64_t m_cacheFirst = 0;
-        std::vector<std::wstring> m_cache;
+        std::vector<Row> m_cache;
         bool m_cacheValid = false;
     };
 }

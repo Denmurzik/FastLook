@@ -194,7 +194,13 @@ namespace fastlook::viewer
         button.IsTabStop(false);
         button.IsChecked(m_view && m_view->Wrap());
         Controls::ToolTipService::SetToolTip(button, winrt::box_value(Str(L"Text", L"Wrap")));
-        button.Click([this](auto const&, auto const&) { ToggleWrap(); });
+        std::weak_ptr<IPreviewer> const weak = shared_from_this();
+        button.Click([weak](auto const&, auto const&) {
+            if (auto const previewer = weak.lock())
+            {
+                static_cast<TextPreviewer&>(*previewer).ToggleWrap();
+            }
+        });
         m_wrapButton = button;
         return {button};
     }
@@ -276,14 +282,13 @@ namespace fastlook::viewer
         {
             return;
         }
-        float const size = m_view->FontSize();
         switch (command)
         {
         case ZoomCommand::In:
-            m_view->ZoomBy((size + 1.0f) / size);
+            m_view->ZoomSteps(1);
             break;
         case ZoomCommand::Out:
-            m_view->ZoomBy(std::max(1.0f, size - 1.0f) / size);
+            m_view->ZoomSteps(-1);
             break;
         case ZoomCommand::Reset:
             m_view->ResetZoom();

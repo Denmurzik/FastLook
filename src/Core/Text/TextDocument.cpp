@@ -13,6 +13,7 @@ namespace fastlook::core
     {
         constexpr uint64_t kSniffBytes = 64 * 1024;
         constexpr uint64_t kChunkBytes = 4 * 1024 * 1024;
+        constexpr uint64_t kFirstChunkBytes = 64 * 1024; // so the first screen is ready (and reported) early
 
         // Paths over MAX_PATH only open with the extended-length prefix.
         std::wstring ExtendedPath(std::filesystem::path const& path)
@@ -126,7 +127,7 @@ namespace fastlook::core
         for (;;)
         {
             if (stop.stop_requested() || faulted_) return;
-            auto const n = static_cast<size_t>((std::min)(kChunkBytes, content_.size() - done));
+            auto const n = static_cast<size_t>((std::min)(done == 0 ? kFirstChunkBytes : kChunkBytes, content_.size() - done));
             bool const last = done + n >= content_.size();
             buffer.resize(n);
             if (n != 0 && !SafeCopy(buffer.data(), content_.data() + done, n))

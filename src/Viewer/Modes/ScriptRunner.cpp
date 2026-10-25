@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Modes/ScriptRunner.h"
 
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -110,6 +111,17 @@ namespace fastlook::viewer
             return 0;
         }
 
+        // Set by the content_ready hook (installed right after the first show, which only returns once the window is visible, i.e.
+        // before the previewer attaches); commands that act on the previewer wait for it instead of being dropped.
+        bool g_contentReady = false;
+        constexpr auto kContentWait = std::chrono::seconds(10);
+        constexpr auto kContentPoll = std::chrono::milliseconds(20);
+
+        bool NeedsContent(std::wstring_view command)
+        {
+            return !command.starts_with(L"wait") && !command.starts_with(L"show");
+        }
+
         winrt::fire_and_forget RunScriptAsync(std::wstring script)
         {
             auto const ui = ViewerHost::Get().Ui();
@@ -117,6 +129,17 @@ namespace fastlook::viewer
             {
                 for (auto const& command : SplitCommands(script))
                 {
+                    if (NeedsContent(command))
+                    {
+                        for (auto waited = std::chrono::milliseconds(0); !g_contentReady && waited < kContentWait; waited += kContentPoll)
+                        {
+                            co_await winrt::resume_after(kContentPoll);
+                            if (!co_await ResumeOn(ui))
+                            {
+                                co_return;
+                            }
+                        }
+                    }
                     if (uint32_t const delayMs = RunCommand(command))
                     {
                         co_await winrt::resume_after(std::chrono::milliseconds(delayMs));
@@ -136,6 +159,15 @@ namespace fastlook::viewer
 
     void RunScript(std::wstring_view script)
     {
+        auto& host = ViewerHost::Get();
+        auto previous = host.contentReady;
+        host.contentReady = [previous] {
+            g_contentReady = true;
+            if (previous)
+            {
+                previous();
+            }
+        };
         RunScriptAsync(std::wstring{script});
     }
 }

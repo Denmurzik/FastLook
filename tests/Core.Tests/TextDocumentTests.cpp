@@ -165,7 +165,7 @@ TEST(TextDocument, BuildIndexIsChunkedStoppableAndResumable)
     std::vector<bool> completes;
     doc->BuildIndex({}, [&](uint64_t, bool complete) { completes.push_back(complete); });
     EXPECT_TRUE(doc->IndexComplete());
-    ASSERT_EQ(completes.size(), 2u); // 9 MiB+ = 4 + 4 + rest; the first chunk is already done
+    ASSERT_EQ(completes.size(), 3u); // 9 MiB+ = 64 KiB + 4 MiB + 4 MiB + rest; the first (64 KiB) chunk is already done
     EXPECT_TRUE(completes.back());
     EXPECT_EQ(doc->LineCount(), data.size() / row.size() + 1);
     EXPECT_EQ(doc->LineText(doc->LineCount() - 2), L"0123456789abcdef");
