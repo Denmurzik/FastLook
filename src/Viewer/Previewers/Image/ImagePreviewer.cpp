@@ -32,8 +32,9 @@ namespace fastlook::viewer
         core::SizeU const target{static_cast<uint32_t>(std::ceil(ctx->maxContentDip.Width * ctx->scale)),
                                  static_cast<uint32_t>(std::ceil(ctx->maxContentDip.Height * ctx->scale))};
 
+        auto wic = WicFactory(); // taken on the UI thread, see DecodeToSize
         co_await winrt::resume_background();
-        DecodedImage decoded = DecodeToSize(m_path, target, stop.get_token());
+        DecodedImage decoded = DecodeToSize(m_path, target, stop.get_token(), std::move(wic));
         if (cancel() || !decoded.bitmap)
         {
             co_return;
@@ -139,11 +140,12 @@ namespace fastlook::viewer
         auto self = std::static_pointer_cast<ImagePreviewer>(shared_from_this());
         auto const path = m_path;
         auto const ui = m_ctx->ui;
+        auto wic = WicFactory(); // Redecode is called on the UI thread; see DecodeToSize
         try
         {
             core::perf::Mark("redecode", "w=" + std::to_string(target.w) + " h=" + std::to_string(target.h));
             co_await winrt::resume_background();
-            DecodedImage decoded = DecodeToSize(path, target, stop);
+            DecodedImage decoded = DecodeToSize(path, target, stop, std::move(wic));
             if (stop.stop_requested() || !decoded.bitmap)
             {
                 co_return;

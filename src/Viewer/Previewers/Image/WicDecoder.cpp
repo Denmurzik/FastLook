@@ -179,11 +179,8 @@ namespace fastlook::viewer
             return source;
         }
 
-        DecodedImage Decode(std::filesystem::path const& path, core::SizeU target, std::stop_token const& stop)
+        DecodedImage Decode(std::filesystem::path const& path, core::SizeU target, std::stop_token const& stop, com_ptr<IWICImagingFactory2> const& wicRef)
         {
-            // Own reference: DeviceResources::ReleaseAll (idle trim) may reset the shared factory during a long decode.
-            com_ptr<IWICImagingFactory2> wicRef;
-            wicRef.copy_from(DeviceResources::Get().Wic());
             if (!wicRef)
             {
                 ThrowDecodeFailed();
@@ -254,11 +251,19 @@ namespace fastlook::viewer
         }
     }
 
-    DecodedImage DecodeToSize(std::filesystem::path const& path, core::SizeU target, std::stop_token stop)
+    winrt::com_ptr<IWICImagingFactory2> WicFactory()
+    {
+        winrt::com_ptr<IWICImagingFactory2> factory;
+        factory.copy_from(DeviceResources::Get().Wic());
+        return factory;
+    }
+
+    DecodedImage DecodeToSize(std::filesystem::path const& path, core::SizeU target, std::stop_token stop,
+                              winrt::com_ptr<IWICImagingFactory2> wic)
     {
         try
         {
-            return Decode(path, target, stop);
+            return Decode(path, target, stop, wic);
         }
         catch (PreviewError const&)
         {
