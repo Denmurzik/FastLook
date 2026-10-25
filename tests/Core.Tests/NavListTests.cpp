@@ -132,3 +132,10 @@ TEST(NavList, LocateItemIsCaseInsensitive)
     EXPECT_FALSE(LocateItem(v, ipc::Item{L"C:\\dir\\c.txt"}));
     EXPECT_FALSE(LocateItem({}, ipc::Item{L"C:\\a"}));
 }
+
+TEST(NavList, FolderWindowClampsFocusBeyondTotal)
+{
+    EXPECT_EQ(FolderWindow(0, 5), (IndexRange{0, 0}));
+    EXPECT_EQ(FolderWindow(100, 500), (IndexRange{0, 100}));
+    EXPECT_EQ(FolderWindow(30000, 99999), (IndexRange{24999, 30000}));
+}

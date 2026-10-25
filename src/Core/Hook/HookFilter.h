@@ -57,7 +57,12 @@ namespace fastlook::core::hook
     class HookFilter
     {
     public:
+        // focus: needed only for an activation keydown. Class-name buffers in FocusSnapshot must be NUL-terminated within 64 chars.
         HookVerdict Decide(KeySnapshot const& k, FocusSnapshot const* focus /*only for activation keydown*/, HookConfig const& c) noexcept;
+
+        // Forgets held/swallow/type-ahead state. Call on hook (re)install and on session change (lock, UAC desktop),
+        // where a Space key-up may have been lost.
+        void Reset() noexcept;
 
     private:
         bool m_held = false;

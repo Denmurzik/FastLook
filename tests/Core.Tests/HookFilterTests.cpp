@@ -124,6 +124,8 @@ TEST(HookFilter, CaretInNonEditClassStillTriggersInList)
     EXPECT_EQ(h.Decide(Space(true), &f, HookConfig{}), HookVerdict::Trigger);
 }
 
+// The caret class is only consulted when GUI_CARETBLINKING-style caret info exists (hasCaret); a stale class buffer
+// must not block by itself.
 TEST(HookFilter, EditClassWithoutCaretFlagDoesNotBlockByItself)
 {
     HookFilter h;
@@ -367,8 +369,9 @@ TEST(HookFilter, TypeAheadWindowIs1000ms)
     HookConfig c;
     h.Decide({.vk = 'B', .keyDown = true, .timeMs = 1000, .fgThreadId = 42}, nullptr, c);
     EXPECT_EQ(h.Decide(Space(true, 1999), &f, c), HookVerdict::Pass);
-    h.Decide(Space(false, 2000), &f, c);
-    EXPECT_EQ(h.Decide(Space(true, 2000), &f, c), HookVerdict::Trigger);
+    HookFilter h2; // a passing Space extends the window, so the exact boundary needs a fresh filter
+    h2.Decide({.vk = 'B', .keyDown = true, .timeMs = 1000, .fgThreadId = 42}, nullptr, c);
+    EXPECT_EQ(h2.Decide(Space(true, 2000), &f, c), HookVerdict::Trigger);
 }
 
 TEST(HookFilter, TypeAheadAppliesToDigitsAndNumpad)
@@ -494,8 +497,9 @@ TEST(HookFilter, TickCountWrap)
     HookConfig c;
     h.Decide({.vk = 'B', .keyDown = true, .timeMs = 0xFFFFFF00u, .fgThreadId = 42}, nullptr, c);
     EXPECT_EQ(h.Decide(Space(true, 0x00000100u), &f, c), HookVerdict::Pass);
-    h.Decide(Space(false, 0x00000101u), &f, c);
-    EXPECT_EQ(h.Decide(Space(true, 0x00000400u), &f, c), HookVerdict::Trigger); // diff 1280 ms
+    HookFilter h2;
+    h2.Decide({.vk = 'B', .keyDown = true, .timeMs = 0xFFFFFF00u, .fgThreadId = 42}, nullptr, c);
+    EXPECT_EQ(h2.Decide(Space(true, 0x00000400u), &f, c), HookVerdict::Trigger); // diff 1280 ms
 }
 
 TEST(HookFilter, TypeAheadStillBlocksAcrossRepeatedLetters)
@@ -533,4 +537,66 @@ TEST(HookFilter, IsTypeAheadKeyTable)
     EXPECT_FALSE(IsTypeAheadKey(VK_F1));
     EXPECT_FALSE(IsTypeAheadKey(VK_CONTROL));
     EXPECT_FALSE(IsTypeAheadKey(0));
+}
+
+TEST(HookFilter, LostKeyUpWhileSwallowingDoesNotSwallowNextTypedSpace)
+{
+    HookFilter h;
+    auto list = ListFocus();
+    HookConfig c;
+    EXPECT_EQ(h.Decide(Space(true), &list, c), HookVerdict::Trigger);
+    // key-up lost (Win+L); later the user renames: the first Space press must reach the edit box
+    auto edit = ListFocus();
+    edit.hasCaret = true;
+    wcscpy_s(edit.caretClass, L"Edit");
+    h.Reset();
+    EXPECT_EQ(h.Decide(Space(true, 20000), &edit, c), HookVerdict::Pass);
+    EXPECT_EQ(h.Decide(Space(false, 20010), &edit, c), HookVerdict::Pass);
+}
+
+TEST(HookFilter, ResetClearsHeldAndTypeAhead)
+{
+    HookFilter h;
+    auto f = ListFocus();
+    HookConfig c;
+    h.Decide(Key('B', 1000), nullptr, c);
+    h.Reset();
+    EXPECT_EQ(h.Decide(Space(true, 1100), &f, c), HookVerdict::Trigger);
+}
+
+TEST(HookFilter, StaleSwallowIsHealedOnNextFreshKeyDown)
+{
+    HookFilter h;
+    auto list = ListFocus();
+    HookConfig c;
+    EXPECT_EQ(h.Decide(Space(true), &list, c), HookVerdict::Trigger);
+    EXPECT_EQ(h.Decide(Space(false), &list, c), HookVerdict::Swallow);
+    // m_held is clear; a fresh keydown that passes must not be reported as swallowed afterwards
+    auto edit = ListFocus();
+    edit.hasCaret = true;
+    wcscpy_s(edit.caretClass, L"Edit");
+    EXPECT_EQ(h.Decide(Space(true, 6000), &edit, c), HookVerdict::Pass);
+    EXPECT_EQ(h.Decide(Space(true, 6050), &edit, c), HookVerdict::Pass);
+    EXPECT_EQ(h.Decide(Space(false, 6100), &edit, c), HookVerdict::Pass);
+}
+
+TEST(HookFilter, SpaceInsideTypeAheadWindowExtendsIt)
+{
+    HookFilter h;
+    auto f = ListFocus();
+    HookConfig c;
+    h.Decide(Key('B', 0), nullptr, c);
+    EXPECT_EQ(h.Decide(Space(true, 600), &f, c), HookVerdict::Pass);
+    h.Decide(Space(false, 650), &f, c);
+    EXPECT_EQ(h.Decide(Space(true, 1100), &f, c), HookVerdict::Pass);
+    h.Decide(Space(false, 1150), &f, c);
+    EXPECT_EQ(h.Decide(Space(true, 2200), &f, c), HookVerdict::Trigger);
+}
+
+TEST(HookFilter, ImeProcessKeyArmsTypeAhead)
+{
+    HookFilter h;
+    auto f = ListFocus();
+    h.Decide(Key(VK_PROCESSKEY, 1000), nullptr, HookConfig{});
+    EXPECT_EQ(h.Decide(Space(true, 1100), &f, HookConfig{}), HookVerdict::Pass);
 }

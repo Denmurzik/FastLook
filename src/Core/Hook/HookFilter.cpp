@@ -59,7 +59,12 @@ namespace fastlook::core::hook
         if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) return true;
         if (vk >= VK_OEM_1 && vk <= VK_OEM_3) return true; // ; = , - . / `
         if (vk >= VK_OEM_4 && vk <= VK_OEM_8) return true; // [ \ ] ' and layout-specific
-        return vk == VK_OEM_102 || vk == VK_PACKET;
+        return vk == VK_OEM_102 || vk == VK_PACKET || vk == VK_PROCESSKEY; // PROCESSKEY: IME composition in progress
+    }
+
+    void HookFilter::Reset() noexcept
+    {
+        *this = HookFilter{};
     }
 
     HookVerdict HookFilter::Decide(KeySnapshot const& k, FocusSnapshot const* f, HookConfig const& c) noexcept
@@ -83,12 +88,17 @@ namespace fastlook::core::hook
         }
         if (m_held) return m_swallowing ? HookVerdict::Swallow : HookVerdict::Pass; // autorepeat
         m_held = true;
+        m_swallowing = false; // a stale flag means the previous key-up was lost
         if (c.paused || !f || !ModifiersMatch(c.key, k)) return HookVerdict::Pass;
         if (f->fg == ForegroundKind::Desktop ? !c.desktopEnabled : f->fg != ForegroundKind::Explorer) return HookVerdict::Pass;
         if (f->guiFlags & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE | GUI_INMOVESIZE)) return HookVerdict::Pass;
         if (f->hasCaret && IsEditClass(f->caretClass)) return HookVerdict::Pass;
         if (!f->focusUnderDefView || !IsItemViewClass(f->focusClass)) return HookVerdict::Pass;
-        if (m_typeValid && m_typeThread == k.fgThreadId && k.timeMs - m_typeTime < kTypeAheadWindowMs) return HookVerdict::Pass; // uint32 wrap-safe
+        if (m_typeValid && m_typeThread == k.fgThreadId && k.timeMs - m_typeTime < kTypeAheadWindowMs) // uint32 wrap-safe
+        {
+            m_typeTime = k.timeMs; // a space typed into the search string extends the window
+            return HookVerdict::Pass;
+        }
         m_swallowing = true;
         return HookVerdict::Trigger;
     }

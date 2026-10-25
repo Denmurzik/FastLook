@@ -19,6 +19,7 @@ namespace fastlook::core::nav
     IndexRange FolderWindow(size_t total, size_t focus)
     {
         if (total <= kMaxFolderItems) return {0, total};
+        if (focus >= total) focus = total - 1;
         size_t begin = focus > kWindowRadius ? focus - kWindowRadius : 0;
         size_t end = std::min(total, focus + kWindowRadius + 1);
         return {begin, end};
