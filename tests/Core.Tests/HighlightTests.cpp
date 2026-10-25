@@ -158,11 +158,29 @@ TEST(Highlight, StopRequestHaltsBetweenSteps)
 
 TEST(Highlight, Utf8StepMatchesMultiByteToWideChar)
 {
-    // Valid, stray/truncated/overlong/surrogate/out-of-range sequences, and 4-byte characters.
+    // Valid, stray/truncated/overlong/surrogate/out-of-range sequences, and 4-byte characters. Escapes only (no mojibake risk);
+    // literals are split where a hex digit could follow an escape.
     std::vector<std::string> const samples{
-        "plain", "cafÃ©", "â¬", "ðx", "âx", "âx", "ðx", "ðx",
-        "À", "Á¿", "à", "í ", "ô", "õ", "a",
-        "ÿþ", "abâ", "abð", "â¬â", "ðð"};
+        "plain",
+        "caf\xC3\xA9",
+        "\xE2\x82\xAC",
+        "\xF0\x9F\x98\x80" "x",
+        "\xE2\x82" "x",                    // truncated 3-byte
+        "\xE2" "x",
+        "\xF0\x9F\x98" "x",                // truncated 4-byte
+        "\xF0\x9F" "x",
+        "\xC0\x80",                        // overlong
+        "\xC1\xBF",
+        "\xE0\x80\x80",
+        "\xED\xA0\x80",                    // surrogate
+        "\xF4\x90\x80\x80",                // above U+10FFFF
+        "\xF5\x80\x80\x80",
+        "\x80\x80" "a",                    // stray continuation
+        "\xFF\xFE",
+        "ab\xE2\x82",                      // truncated at the end
+        "ab\xF0",
+        "\xE2\x82\xAC\xE2\x82",
+        "\xF0\x9F\x98\x80\xF0\x9F\x98\x80"};
     for (auto const& s : samples)
     {
         std::span<const uint8_t> const bytes{reinterpret_cast<const uint8_t*>(s.data()), s.size()};
@@ -176,4 +194,21 @@ TEST(Highlight, Utf8StepMatchesMultiByteToWideChar)
         }
         EXPECT_EQ(units, FromUtf8(s).size()) << ::testing::PrintToString(s);
     }
+
+    // Known counts: two stray bytes are two U+FFFD; E2 82 followed by 'x' is one U+FFFD plus 'x'; U+1F600 is a surrogate pair.
+    auto count = [](std::string const& s) {
+        std::span<const uint8_t> const bytes{reinterpret_cast<const uint8_t*>(s.data()), s.size()};
+        size_t units = 0;
+        for (size_t i = 0; i < bytes.size();)
+        {
+            auto const step = NextUtf8Step(bytes, i);
+            i += step.length;
+            units += step.units;
+        }
+        return units;
+    };
+    EXPECT_EQ(count("\xFF\xFE"), 2u);
+    EXPECT_EQ(count("\xE2\x82" "x"), 2u);
+    EXPECT_EQ(count("\xF0\x9F\x98\x80"), 2u);
+    EXPECT_EQ(FromUtf8("\xE2\x82" "x"), (std::wstring{wchar_t(0xFFFD), L'x'}));
 }

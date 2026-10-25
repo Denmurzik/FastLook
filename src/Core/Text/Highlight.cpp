@@ -152,7 +152,11 @@ namespace fastlook::core
             if (i + length >= bytes.size()) return {length, 1}; // truncated
             uint8_t const b = bytes[i + length];
             uint8_t const lo = length == 1 ? low : 0x80, hi = length == 1 ? high : 0xBF;
-            if (b < lo || b > hi) return {length, 1};
+            if (b < lo || b > hi)
+            {
+                // Windows swallows a continuation byte that is out of range for this lead (overlong, surrogate, > U+10FFFF).
+                return (length == 1 && (b & 0xC0) == 0x80) ? Utf8Step{2, 1} : Utf8Step{length, 1};
+            }
         }
         return {length, length == 4 ? 2u : 1u};
     }
