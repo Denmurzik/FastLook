@@ -28,7 +28,7 @@ namespace fastlook::viewer
         constexpr DWORD kQuitWaitMs = 300;
         constexpr DWORD kKillWaitMs = 500;
         constexpr UINT kWatchdogProbeMs = 200;
-        constexpr int kWatchdogFailures = 2;
+        constexpr ULONGLONG kWatchdogHungMs = 5000; // continuous probe failure before the host is killed (a busy Office handler may be slow)
         constexpr int kTitleBarDip = 48;
         constexpr auto kParkInterval = std::chrono::seconds(1);
 
@@ -423,7 +423,8 @@ namespace fastlook::viewer
             {
                 return;
             }
-            // The site belongs to this thread, so SWP_ASYNCWINDOWPOS only keeps the call from sending to windows of other threads.
+            // The site is owned by this thread, so SWP_ASYNCWINDOWPOS changes nothing here (it only posts for windows of other
+            // threads); moving the site does not send to the handler's window.
             SetWindowPos(m_site, HWND_TOP, rect.x, rect.y, rect.w, rect.h, SWP_ASYNCWINDOWPOS | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             if (m_host && (rect.w != m_lastRect.w || rect.h != m_lastRect.h))
             {
@@ -451,7 +452,7 @@ namespace fastlook::viewer
         HWND const site = m_site;
         // Probes the handler's window once a second. A handler that stops answering would stall the Viewer's attached input queue.
         std::thread([weak, alive, ui, site] {
-            int failures = 0;
+            ULONGLONG failingSince = 0;
             while (alive->load())
             {
                 for (int slice = 0; slice < 10 && alive->load(); ++slice)
@@ -467,8 +468,17 @@ namespace fastlook::viewer
                 {
                     continue;
                 }
-                failures = ProbeResponsive(child, kWatchdogProbeMs) ? 0 : failures + 1;
-                if (failures >= kWatchdogFailures)
+                if (ProbeResponsive(child, kWatchdogProbeMs))
+                {
+                    failingSince = 0;
+                    continue;
+                }
+                ULONGLONG const now = GetTickCount64();
+                if (failingSince == 0)
+                {
+                    failingSince = now;
+                }
+                if (now - failingSince >= kWatchdogHungMs)
                 {
                     ui.TryEnqueue([weak] {
                         if (auto self = weak.lock())
@@ -490,10 +500,11 @@ namespace fastlook::viewer
         }
         FL_LOG_INFO(L"shell handler window stopped answering: host terminated");
         m_ready = false;
-        if (m_host)
+        std::shared_ptr<HostProcess> const host = m_host;
+        if (host)
         {
-            m_host->DetachKeyHandler();
-            m_host->Terminate(); // our host's death destroys an in-process handler window and detaches the input queues
+            host->DetachKeyHandler();
+            host->Terminate(); // our host's death destroys an in-process handler window and detaches the input queues
         }
         if (m_site)
         {
@@ -507,7 +518,21 @@ namespace fastlook::viewer
             text.VerticalAlignment(VerticalAlignment::Center);
             m_placeholder.Children().Append(text);
         }
-        FocusRoot();
+        // Focus goes back only once the host is really gone: until then it may still hold it and answer nothing.
+        std::weak_ptr<ShellPreviewer> const weak = std::static_pointer_cast<ShellPreviewer>(shared_from_this());
+        auto const ui = m_ctx->ui;
+        std::thread([weak, host, ui] {
+            if (host)
+            {
+                host->WaitExit(kKillWaitMs);
+            }
+            ui.TryEnqueue([weak] {
+                if (auto self = weak.lock())
+                {
+                    self->FocusRoot();
+                }
+            });
+        }).detach();
     }
 
     void ShellPreviewer::Unload()
