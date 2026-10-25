@@ -1,25 +1,25 @@
 #include <gtest/gtest.h>
 
-#include <set>
+#include <ILexer.h>
+#include <Lexilla.h>
+
 #include <string>
 
 #include "FileTypes/Extensions.h"
 
 using namespace fastlook::core;
 
-// The vcpkg lexilla port ships headers only (no library to call CreateLexer on), so the mapped names are
-// checked against the lexer names registered by Lexilla 5.4.6 (Lexilla.h / LexicalStyles.iface, SCLEX_*).
 TEST(LexerMap, AllMappedLexersExistInLexilla)
 {
-    static const std::set<std::string, std::less<>> lexilla{
-        "asm", "bash", "batch", "cmake", "cpp", "css", "diff", "fortran", "haskell", "hypertext", "json", "latex",
-        "lua", "makefile", "markdown", "pascal", "perl", "phpscript", "powershell", "props", "python", "r", "ruby",
-        "rust", "sql", "toml", "vb", "xml", "yaml"};
     for (auto ext : MappedTextExtensions())
     {
         auto name = LexerNameFor(std::wstring(L"f.") + std::wstring(ext));
-        if (!name.empty())
-            EXPECT_TRUE(lexilla.contains(name)) << std::string(name);
+        if (name.empty())
+            continue;
+        auto* lx = CreateLexer(std::string(name).c_str());
+        EXPECT_NE(lx, nullptr) << std::string(name);
+        if (lx)
+            lx->Release();
     }
 }
 

@@ -49,6 +49,7 @@
   </ItemDefinitionGroup>
   <ItemDefinitionGroup>
     <ClCompile>
+      <AdditionalIncludeDirectories>$(RepoRoot)third_party\lexilla\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>FASTLOOK_FIXTURES_DIR=L&quot;$(RepoRoot.Replace('\','\\'))tests\\fixtures\\&quot;;%(PreprocessorDefinitions)</PreprocessorDefinitions>
     </ClCompile>
   </ItemDefinitionGroup>
@@ -58,6 +59,7 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Core\FastLook.Core.vcxproj" />
+    <ProjectReference Include="..\..\src\Lexilla\FastLook.Lexilla.vcxproj" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets" />

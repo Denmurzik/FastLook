@@ -12,6 +12,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "FastLook.Viewer", "src\View
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "FastLook.Core.Tests", "tests\Core.Tests\FastLook.Core.Tests.vcxproj", "{A1D4C3B2-0004-4E5F-8A01-C0FFEE000004}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "FastLook.Lexilla", "src\Lexilla\FastLook.Lexilla.vcxproj", "{A1D4C3B2-0005-4E5F-8A01-C0FFEE000005}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|x64 = Debug|x64
@@ -38,6 +40,10 @@ Global
 		{A1D4C3B2-0004-4E5F-8A01-C0FFEE000004}.Debug|x64.Build.0 = Debug|x64
 		{A1D4C3B2-0004-4E5F-8A01-C0FFEE000004}.Release|x64.ActiveCfg = Release|x64
 		{A1D4C3B2-0004-4E5F-8A01-C0FFEE000004}.Release|x64.Build.0 = Release|x64
+		{A1D4C3B2-0005-4E5F-8A01-C0FFEE000005}.Debug|x64.ActiveCfg = Debug|x64
+		{A1D4C3B2-0005-4E5F-8A01-C0FFEE000005}.Debug|x64.Build.0 = Debug|x64
+		{A1D4C3B2-0005-4E5F-8A01-C0FFEE000005}.Release|x64.ActiveCfg = Release|x64
+		{A1D4C3B2-0005-4E5F-8A01-C0FFEE000005}.Release|x64.Build.0 = Release|x64
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
