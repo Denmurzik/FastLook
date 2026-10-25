@@ -216,6 +216,7 @@ namespace winrt::FastLook::implementation
             auto const size = appWindow.Size();
             m_windowedBounds = {position.X, position.Y, size.Width, size.Height};
             m_fullscreen = true;
+            m_barHeight = bar.Height();
             bar.Height(GridLengthHelper::FromPixels(0));
             TitleBarHost().Visibility(Visibility::Collapsed);
             appWindow.SetPresenter(AppWindowPresenterKind::FullScreen);
@@ -230,7 +231,7 @@ namespace winrt::FastLook::implementation
                 presenter.IsMaximizable(m_pinned);
             }
             appWindow.MoveAndResize(m_windowedBounds);
-            bar.Height(GridLengthHelper::FromPixels(48));
+            bar.Height(m_barHeight); // the height XAML defines
             TitleBarHost().Visibility(Visibility::Visible);
             UpdateCaptionInset();
         }

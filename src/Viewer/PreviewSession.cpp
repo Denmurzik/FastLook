@@ -750,6 +750,10 @@ namespace fastlook::viewer
         {
             return;
         }
+        if (ViewerHost::Get().Window()->IsFullscreen())
+        {
+            return; // the content just re-lays out inside the full-screen window
+        }
         auto const& previewer = *m_attached->previewer;
         auto const preferred = previewer.PreferredSize();
         if (preferred.Width <= 0 || preferred.Height <= 0)
@@ -856,11 +860,6 @@ namespace fastlook::viewer
                 co_return; // shown again while the window was animating out
             }
 
-            if (host.Window()->IsFullscreen())
-            {
-                host.Window()->ToggleFullscreen(); // the next show starts windowed
-            }
-
             // Give the foreground back to the Explorer window the preview was opened from while our window still holds it:
             // after Hide() Windows would pick some other window (decision 25).
             if (explorer != nullptr && IsWindow(explorer))
@@ -874,6 +873,10 @@ namespace fastlook::viewer
 
             window.AppWindow().Hide();
             window.AppWindow().IsShownInSwitchers(false);
+            if (auto* impl = winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(window); impl->IsFullscreen())
+            {
+                impl->ToggleFullscreen(); // hidden by now: the next show starts windowed without a flash at the old bounds
+            }
             if (m_renderToken)
             {
                 winrt::Microsoft::UI::Xaml::Media::CompositionTarget::Rendering(m_renderToken);

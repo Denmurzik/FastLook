@@ -55,6 +55,7 @@ namespace winrt::FastLook::implementation
         UINT m_insetDpi = 0;
         bool m_pinned = false;
         bool m_fullscreen = false;
+        Microsoft::UI::Xaml::GridLength m_barHeight{};
         Windows::Graphics::RectInt32 m_windowedBounds{};
         std::optional<bool> m_captionDark;
         std::shared_ptr<fastlook::viewer::TitleBar> m_titleBar;
