@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 
 #include "Util/SettingsUi.h"
 #include "Util/Str.h"
@@ -58,19 +59,38 @@ namespace winrt::FastLook::implementation
         fontSize.ValidationMode(NumberBoxValidationMode::InvalidInputOverwritten);
         fontSize.Width(140);
         fontSize.Value(std::clamp<double>(preview.codeFontSize, kMinFontSize, kMaxFontSize));
-        fontSize.ValueChanged([error](NumberBox const& box, NumberBoxValueChangedEventArgs const& args) {
-            double const value = args.NewValue();
+        struct FontState
+        {
+            double saved;
+            bool reverting = false;
+        };
+        auto const fontState = std::make_shared<FontState>(FontState{fontSize.Value()});
+        fontSize.ValueChanged([error, fontState](NumberBox const& box, NumberBoxValueChangedEventArgs const&) {
+            if (fontState->reverting)
+            {
+                return;
+            }
+            double const value = box.Value();
             if (std::isnan(value))
             {
-                box.Value(args.OldValue()); // an emptied box keeps the previous size
+                // An emptied box keeps the last saved size.
+                fontState->reverting = true;
+                box.Value(fontState->saved);
+                fontState->reverting = false;
                 return;
             }
             auto const size = static_cast<uint32_t>(std::lround(std::clamp(value, kMinFontSize, kMaxFontSize)));
             bool const ok = CommitSettings([size](core::Settings& s) { s.preview.codeFontSize = size; });
             ShowSaveResult(error, ok);
-            if (!ok && !std::isnan(args.OldValue()))
+            if (ok)
             {
-                box.Value(args.OldValue()); // roll back; the re-entrant change saves the old size again
+                fontState->saved = size;
+            }
+            else
+            {
+                fontState->reverting = true;
+                box.Value(fontState->saved);
+                fontState->reverting = false;
             }
         });
         rows.Append(MakeSettingsRow(Str(L"Settings", L"CodeFontSize"), Str(L"Settings", L"CodeFontSizeDesc"), fontSize));
