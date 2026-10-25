@@ -78,6 +78,6 @@ namespace fastlook::core::ipc
     // nullopt: malformed JSON, missing/unknown "type", "v" missing or != kProtocolVersion, wrongly typed field.
     std::optional<Message> Parse(std::string_view json);
 
-    // L"\\\\.\\pipe\\FastLook-<user SID string>-v1"
+    // L"\\\\.\\pipe\\FastLook-<user SID string>-v1"; empty when the user SID cannot be queried.
     std::wstring PipeNameForCurrentUser();
 }

@@ -324,7 +324,7 @@ namespace fastlook::core::ipc
 
     std::wstring PipeNameForCurrentUser()
     {
-        std::wstring sid = L"unknown";
+        std::wstring sid;
         HANDLE token = nullptr;
         if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
         {
@@ -341,6 +341,10 @@ namespace fastlook::core::ipc
                 }
             }
             CloseHandle(token);
+        }
+        if (sid.empty())
+        {
+            return {}; // no shared fallback name: a pipe that is not per-user must not exist
         }
         return L"\\\\.\\pipe\\FastLook-" + sid + L"-v1";
     }
