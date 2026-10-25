@@ -72,7 +72,7 @@ namespace fastlook::viewer
             co_return;
         }
 
-        if (!co_await ResumeOn(ui))
+        if (!co_await ResumeOn(ui) || cancel())
         {
             co_return;
         }

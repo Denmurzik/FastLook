@@ -99,8 +99,15 @@ namespace fastlook::viewer
         }
 
         // Converts a decoded frame to premultiplied BGRA and copies it into `out` (w * h pixels). Returns the frame size.
-        core::SizeU CopyFramePbgra(IWICImagingFactory2* wic, IWICBitmapFrameDecode* frame, std::vector<uint32_t>& out)
+        // A frame larger than the canvas is rejected before anything is allocated for it.
+        core::SizeU CopyFramePbgra(IWICImagingFactory2* wic, IWICBitmapFrameDecode* frame, core::SizeU canvas, std::vector<uint32_t>& out)
         {
+            UINT frameW = 0, frameH = 0;
+            check_hresult(frame->GetSize(&frameW, &frameH));
+            if (frameW == 0 || frameH == 0 || frameW > canvas.w || frameH > canvas.h)
+            {
+                throw std::runtime_error("animation frame does not fit the canvas");
+            }
             com_ptr<IWICPalette> palette;
             if (SUCCEEDED(wic->CreatePalette(palette.put())) && FAILED(frame->CopyPalette(palette.get())))
             {
@@ -120,23 +127,12 @@ namespace fastlook::viewer
         class GifSource final : public AnimatedImage::FrameSource
         {
         public:
-            GifSource(com_ptr<IWICImagingFactory2> wic, std::vector<uint8_t> bytes) : m_wic(std::move(wic)), m_bytes(std::move(bytes))
+            // `canvas` is the logical screen from the file header, already checked against the animation size limit.
+            GifSource(com_ptr<IWICImagingFactory2> wic, std::vector<uint8_t> bytes, core::SizeU canvas)
+                : m_wic(std::move(wic)), m_bytes(std::move(bytes)), m_canvas(canvas)
             {
                 m_decoder = DecoderFromMemory(m_wic.get(), m_bytes);
                 check_hresult(m_decoder->GetFrameCount(&m_count));
-                com_ptr<IWICMetadataQueryReader> reader;
-                if (SUCCEEDED(m_decoder->GetMetadataQueryReader(reader.put())))
-                {
-                    m_canvas = {ReadMeta(reader.get(), L"/logscrdesc/Width").value_or(0), ReadMeta(reader.get(), L"/logscrdesc/Height").value_or(0)};
-                }
-                if (m_canvas.w == 0 || m_canvas.h == 0)
-                {
-                    com_ptr<IWICBitmapFrameDecode> first;
-                    check_hresult(m_decoder->GetFrame(0, first.put()));
-                    UINT w = 0, h = 0;
-                    check_hresult(first->GetSize(&w, &h));
-                    m_canvas = {w, h};
-                }
                 m_compositor.Begin(m_canvas);
             }
 
@@ -165,16 +161,17 @@ namespace fastlook::viewer
                 }
                 info.blend = core::Blend::Over;
 
-                auto const size = CopyFramePbgra(m_wic.get(), frame.get(), m_frame);
+                auto const size = CopyFramePbgra(m_wic.get(), frame.get(), m_canvas, m_frame);
                 info.rect.w = static_cast<int32_t>(size.w);
                 info.rect.h = static_cast<int32_t>(size.h);
                 m_compositor.Apply(info, m_frame);
+                std::vector<uint32_t>().swap(m_frame); // not needed until the next frame
                 std::copy_n(m_compositor.Canvas().begin(), std::min(out.size(), m_compositor.Canvas().size()), out.begin());
 
                 if (++m_index >= m_count)
                 {
                     m_index = 0;
-                    m_compositor.Begin(m_canvas);
+                    m_compositor.Restart();
                 }
                 return info.delayMs;
             }
@@ -208,19 +205,20 @@ namespace fastlook::viewer
                 auto decoder = DecoderFromMemory(m_wic.get(), entry.png);
                 com_ptr<IWICBitmapFrameDecode> frame;
                 check_hresult(decoder->GetFrame(0, frame.put()));
-                auto const size = CopyFramePbgra(m_wic.get(), frame.get(), m_frame);
+                auto const size = CopyFramePbgra(m_wic.get(), frame.get(), m_file.canvas, m_frame);
                 if (size.w != static_cast<uint32_t>(entry.info.rect.w) || size.h != static_cast<uint32_t>(entry.info.rect.h))
                 {
                     throw std::runtime_error("APNG frame size mismatch");
                 }
                 m_compositor.Apply(entry.info, m_frame);
+                std::vector<uint32_t>().swap(m_frame); // not needed until the next frame
                 std::copy_n(m_compositor.Canvas().begin(), std::min(out.size(), m_compositor.Canvas().size()), out.begin());
 
                 uint32_t const delay = entry.info.delayMs;
                 if (++m_index >= m_file.frames.size())
                 {
                     m_index = 0;
-                    m_compositor.Begin(m_file.canvas);
+                    m_compositor.Restart();
                 }
                 return delay;
             }
@@ -308,7 +306,13 @@ namespace fastlook::viewer
                 {
                     return nullptr;
                 }
-                auto source = std::make_unique<GifSource>(wic, std::move(bytes));
+                // Header values are untrusted: the size limit is checked before any decoder or canvas exists.
+                auto const screen = core::GifLogicalScreenSize(bytes);
+                if (!screen || !core::CanAnimateCanvas(*screen))
+                {
+                    return nullptr;
+                }
+                auto source = std::make_unique<GifSource>(wic, std::move(bytes), *screen);
                 return source->FrameCount() > 1 ? std::move(source) : nullptr;
             }
             if (ext == L".png" || ext == L".apng")
@@ -319,7 +323,7 @@ namespace fastlook::viewer
                     return nullptr;
                 }
                 auto file = core::ParseApng(bytes);
-                if (!file || file->frames.size() < 2)
+                if (!file || file->frames.size() < 2 || !core::CanAnimateCanvas(file->canvas))
                 {
                     return nullptr;
                 }
@@ -330,7 +334,8 @@ namespace fastlook::viewer
             {
                 auto bytes = ReadWholeFile(path);
                 WebPBitstreamFeatures features{};
-                if (bytes.empty() || WebPGetFeatures(bytes.data(), bytes.size(), &features) != VP8_STATUS_OK || !features.has_animation)
+                if (bytes.empty() || WebPGetFeatures(bytes.data(), bytes.size(), &features) != VP8_STATUS_OK || !features.has_animation ||
+                    !core::CanAnimateCanvas({static_cast<uint32_t>(std::max(features.width, 0)), static_cast<uint32_t>(std::max(features.height, 0))}))
                 {
                     return nullptr;
                 }
@@ -376,6 +381,10 @@ namespace fastlook::viewer
 
     winrt::Microsoft::UI::Xaml::Media::ImageSource AnimatedImage::Attach(winrt::Microsoft::UI::Dispatching::DispatcherQueue const& ui)
     {
+        if (m_bitmap)
+        {
+            return m_bitmap; // already attached: one timer, one bitmap
+        }
         m_ui = ui;
         m_bitmap = winrt::Microsoft::UI::Xaml::Media::Imaging::WriteableBitmap{static_cast<int32_t>(m_canvas.w), static_cast<int32_t>(m_canvas.h)};
         m_timer = ui.CreateTimer();

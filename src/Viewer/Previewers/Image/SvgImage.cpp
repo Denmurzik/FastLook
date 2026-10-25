@@ -62,17 +62,28 @@ namespace fastlook::viewer
             return document;
         }
 
-        // A length attribute in user units; percentages and unsupported units count as absent.
+        // A length attribute in CSS px (px/pt/pc/mm/cm/in via ParseSvgLength); percentages and relative units count as absent.
         std::optional<double> ReadLength(ID2D1SvgElement* root, wchar_t const* name)
         {
-            D2D1_SVG_LENGTH length{};
-            if (!root->IsAttributeSpecified(name, nullptr) ||
-                FAILED(root->GetAttributeValue(name, D2D1_SVG_ATTRIBUTE_POD_TYPE_LENGTH, &length, sizeof(length))) ||
-                length.units != D2D1_SVG_LENGTH_UNITS_NUMBER)
+            if (!root->IsAttributeSpecified(name, nullptr))
             {
                 return std::nullopt;
             }
-            return length.value;
+            UINT32 length = 0;
+            if (SUCCEEDED(root->GetAttributeValueLength(name, D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, &length)) && length > 0 && length < 256)
+            {
+                std::wstring text(length + 1, wchar_t{});
+                if (SUCCEEDED(root->GetAttributeValue(name, D2D1_SVG_ATTRIBUTE_STRING_TYPE_SVG, text.data(), length + 1)))
+                {
+                    return core::ParseSvgLength(text.c_str());
+                }
+            }
+            D2D1_SVG_LENGTH pod{};
+            if (SUCCEEDED(root->GetAttributeValue(name, D2D1_SVG_ATTRIBUTE_POD_TYPE_LENGTH, &pod, sizeof(pod))) && pod.units == D2D1_SVG_LENGTH_UNITS_NUMBER)
+            {
+                return pod.value;
+            }
+            return std::nullopt;
         }
 
         std::optional<core::SizeD> ReadViewBox(ID2D1SvgElement* root)

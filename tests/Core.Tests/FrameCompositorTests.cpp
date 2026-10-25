@@ -72,3 +72,16 @@ TEST(FrameCompositor, ClipsFramesOutsideTheCanvas)
     c.Apply({{0, 0, 2, 2}, 100, Dispose::None, Blend::Source}, Solid(1, 1, kRed)); // short pixel data: ignored
     EXPECT_EQ(At(c, 1, 1, 2), kBlue);
 }
+
+TEST(FrameCompositor, RestartClearsCanvasAndDisposalState)
+{
+    FrameCompositor c;
+    c.Begin({2, 2});
+    c.Apply({{0, 0, 2, 2}, 100, Dispose::Background, Blend::Source}, Solid(2, 2, kRed));
+    c.Restart();
+    EXPECT_EQ(At(c, 0, 0, 2), 0u);
+    EXPECT_EQ(c.Canvas().size(), 4u);
+    c.Apply({{0, 0, 1, 1}, 100, Dispose::None, Blend::Source}, Solid(1, 1, kGreen)); // no stale disposal of the old frame
+    EXPECT_EQ(At(c, 0, 0, 2), kGreen);
+    EXPECT_EQ(At(c, 1, 1, 2), 0u);
+}

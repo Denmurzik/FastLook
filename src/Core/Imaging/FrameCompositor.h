@@ -36,6 +36,8 @@ namespace fastlook::core
     {
     public:
         void Begin(SizeU canvas);
+        // Back to a blank canvas of the same size (loop wrap) without reallocating it.
+        void Restart();
         // `framePBGRA` holds rect.w * rect.h pixels (stride = rect.w); the rect is clipped to the canvas.
         void Apply(FrameInfo const& frame, std::span<const uint32_t> framePBGRA);
         std::span<const uint32_t> Canvas() const { return m_canvas; }

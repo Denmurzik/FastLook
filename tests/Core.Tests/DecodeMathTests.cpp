@@ -43,10 +43,51 @@ TEST(DecodeMath, FrameDelayNormalization)
 TEST(DecodeMath, AnimationCanvasLimit)
 {
     EXPECT_TRUE(CanAnimateCanvas({64, 48}));
-    EXPECT_TRUE(CanAnimateCanvas({4096, 4096}));
-    EXPECT_FALSE(CanAnimateCanvas({4097, 100}));
-    EXPECT_FALSE(CanAnimateCanvas({100, 4097}));
+    EXPECT_TRUE(CanAnimateCanvas({2048, 2048}));
+    EXPECT_TRUE(CanAnimateCanvas({4200, 1000}));
+    EXPECT_FALSE(CanAnimateCanvas({4096, 4096}));
+    EXPECT_FALSE(CanAnimateCanvas({2050, 2050}));
+    EXPECT_FALSE(CanAnimateCanvas({65535, 65535}));
+    EXPECT_FALSE(CanAnimateCanvas({0xFFFFFFFFu, 0xFFFFFFFFu}));
     EXPECT_FALSE(CanAnimateCanvas({0, 10}));
+}
+
+namespace
+{
+    std::vector<uint8_t> GifHeader(unsigned w, unsigned h)
+    {
+        return {'G', 'I', 'F', '8', '9', 'a', static_cast<uint8_t>(w), static_cast<uint8_t>(w >> 8), static_cast<uint8_t>(h), static_cast<uint8_t>(h >> 8)};
+    }
+}
+
+TEST(DecodeMath, GifLogicalScreenFromHeader)
+{
+    EXPECT_EQ(GifLogicalScreenSize(GifHeader(64, 48)), (SizeU{64, 48}));
+    EXPECT_EQ(GifLogicalScreenSize(GifHeader(65535, 65535)), (SizeU{65535, 65535}));
+    EXPECT_FALSE(GifLogicalScreenSize(B("GIF90a1234")));
+    EXPECT_FALSE(GifLogicalScreenSize(B("GIF89a")));
+    EXPECT_FALSE(GifLogicalScreenSize({}));
+    auto real = ReadBytes("image/anim.gif");
+    ASSERT_FALSE(real.empty());
+    EXPECT_EQ(GifLogicalScreenSize(real), (SizeU{64, 48}));
+}
+
+TEST(DecodeMath, SvgLengthUnits)
+{
+    EXPECT_EQ(ParseSvgLength(L"24"), 24.0);
+    EXPECT_EQ(ParseSvgLength(L" 24px "), 24.0);
+    EXPECT_EQ(ParseSvgLength(L"1in"), 96.0);
+    EXPECT_EQ(ParseSvgLength(L"72pt"), 96.0);
+    EXPECT_EQ(ParseSvgLength(L"1pc"), 16.0);
+    EXPECT_NEAR(*ParseSvgLength(L"25.4mm"), 96.0, 1e-9);
+    EXPECT_NEAR(*ParseSvgLength(L"2.54cm"), 96.0, 1e-9);
+    EXPECT_EQ(ParseSvgLength(L"1.5e1"), 15.0);
+    EXPECT_FALSE(ParseSvgLength(L"100%"));
+    EXPECT_FALSE(ParseSvgLength(L"2em"));
+    EXPECT_FALSE(ParseSvgLength(L"3ex"));
+    EXPECT_FALSE(ParseSvgLength(L"auto"));
+    EXPECT_FALSE(ParseSvgLength(L""));
+    EXPECT_FALSE(ParseSvgLength(L"px"));
 }
 
 TEST(DecodeMath, SvgIntrinsicSize)

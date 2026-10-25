@@ -44,7 +44,14 @@ namespace fastlook::core
     {
         m_size = canvas;
         m_canvas.assign(static_cast<size_t>(canvas.w) * canvas.h, 0);
-        m_saved.clear();
+        std::vector<uint32_t>().swap(m_saved); // only needed between a Dispose::Previous frame and the next one
+        m_hasPrevious = false;
+    }
+
+    void FrameCompositor::Restart()
+    {
+        std::fill(m_canvas.begin(), m_canvas.end(), 0u);
+        std::vector<uint32_t>().swap(m_saved);
         m_hasPrevious = false;
     }
 
@@ -70,7 +77,7 @@ namespace fastlook::core
         {
             m_canvas = m_saved;
         }
-        m_saved.clear();
+        std::vector<uint32_t>().swap(m_saved); // only needed between a Dispose::Previous frame and the next one
     }
 
     void FrameCompositor::Apply(FrameInfo const& frame, std::span<const uint32_t> framePBGRA)
