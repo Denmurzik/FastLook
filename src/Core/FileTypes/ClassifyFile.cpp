@@ -64,17 +64,20 @@ namespace fastlook::core
             return result;
         }
 
+        auto byExt = KindForExtension(path);
+        std::wstring ext = LowerExtension(path);
+        bool decidedByTable = byExt && *byExt != PreviewerKind::Text && *byExt != PreviewerKind::Markdown;
+        // ".ts" (TypeScript or MPEG-TS) is the one table-decided kind that still needs the content.
+        bool needsHead = !decidedByTable || ext == L"ts";
+
         std::vector<uint8_t> head;
-        if (!ReadHead(fullPath, head))
+        if (needsHead && !ReadHead(fullPath, head))
             return result;
 
         ClassifyInput in;
         in.fileName = path;
         in.head = head;
 
-        auto byExt = KindForExtension(path);
-        bool decidedByTable = byExt && *byExt != PreviewerKind::Text && *byExt != PreviewerKind::Markdown;
-        std::wstring ext = LowerExtension(path);
         if (!decidedByTable && !ext.empty())
         {
             in.perceived = GetPerceivedKind(ext);

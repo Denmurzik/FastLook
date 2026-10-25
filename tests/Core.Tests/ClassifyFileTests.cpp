@@ -51,7 +51,11 @@ TEST(ClassifyFile, MissingVirtualAndPlaceholder)
 
     auto path = WriteFile(dir, L"cloud.txt", "hello");
     ASSERT_TRUE(SetFileAttributesW(path.c_str(), FILE_ATTRIBUTE_OFFLINE));
+    // An exclusive lock makes any open attempt fail: the placeholder must be recognised from attributes alone.
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    ASSERT_NE(h, INVALID_HANDLE_VALUE);
     auto r = ClassifyFile(path, false, true);
+    CloseHandle(h);
     EXPECT_EQ(r.kind, PreviewerKind::Fallback);
     EXPECT_TRUE(r.cloudPlaceholder);
 }
@@ -65,4 +69,19 @@ TEST(ClassifyFile, LockedExclusivelyIsFallback)
     ASSERT_NE(h, INVALID_HANDLE_VALUE);
     EXPECT_EQ(ClassifyFile(path, false, true).kind, PreviewerKind::Fallback);
     CloseHandle(h);
+}
+
+TEST(ClassifyFile, TableDecidedKindsDoNotOpenTheFile)
+{
+    CoInit com;
+    auto dir = MakeTempDir();
+    for (auto [name, kind] : {std::pair{L"locked.png", PreviewerKind::Image}, std::pair{L"locked.mp4", PreviewerKind::Media},
+                              std::pair{L"locked.pdf", PreviewerKind::Pdf}, std::pair{L"locked.zip", PreviewerKind::Archive}})
+    {
+        auto path = WriteFile(dir, name, "x");
+        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        ASSERT_NE(h, INVALID_HANDLE_VALUE);
+        EXPECT_EQ(ClassifyFile(path, false, true).kind, kind);
+        CloseHandle(h);
+    }
 }

@@ -28,7 +28,29 @@ TEST(HandlerLookup, BlocklistByPathAndClsid)
     EXPECT_TRUE(IsBlockedPreviewHandler(L"{x}", L"c:\\windows\\system32\\MSHTML.DLL"));
     EXPECT_TRUE(IsBlockedPreviewHandler(L"{x}", L"c:\\program files\\POWERTOYS\\x.dll"));
     EXPECT_FALSE(IsBlockedPreviewHandler(L"{x}", L"C:\\Windows\\System32\\fontext.dll"));
-    EXPECT_FALSE(IsBlockedPreviewHandler(L"{x}", L""));
+    EXPECT_FALSE(IsBlockedPreviewHandler(L"{x}", L"C:\\Windows\\System32\\shell32.dll"));
+}
+
+TEST(HandlerLookup, UnresolvableServerPathIsBlocked)
+{
+    EXPECT_TRUE(IsBlockedPreviewHandler(L"{x}", L""));
+}
+
+TEST(HandlerLookup, KnownWebView2ClsidsAreBlockedWhateverThePath)
+{
+    constexpr wchar_t innocent[] = L"C:\\Windows\\System32\\fontext.dll";
+    for (auto clsid : {L"{60789D87-9C3C-44AF-B18C-3DE2C2820ED3}",   // PowerToys Markdown
+                       L"{FCDD4EED-41AA-492F-8A84-31A1546226E0}",   // PowerToys SVG
+                       L"{D8034CFA-F34B-41FE-AD45-62FCBB52A6DA}",   // PowerToys Monaco
+                       L"{A5A41CC7-02CB-41D4-8C9B-9087040D6098}",   // PowerToys PDF
+                       L"{45769bcc-e8fd-42d0-947e-02beef77a1f5}",   // PowerToys managed Markdown
+                       L"{3A84F9C2-6164-485C-A7D9-4B27F8AC009E}"})  // Edge PDF previewer
+        EXPECT_TRUE(IsBlockedPreviewHandler(clsid, innocent)) << "clsid";
+}
+
+TEST(HandlerLookup, ManagedHandlersViaMscoreeAreBlocked)
+{
+    EXPECT_TRUE(IsBlockedPreviewHandler(L"{x}", L"C:\\Windows\\System32\\MSCOREE.DLL"));
 }
 
 TEST(HandlerLookup, WicKnowsPng)

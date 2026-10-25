@@ -63,6 +63,30 @@ namespace fastlook::core
             return exe == std::wstring::npos ? command : command.substr(0, exe + 4);
         }
 
+        // Handlers known to embed WebView2. Lower-case, with braces. Source: PowerToys
+        // src/modules/previewpane/FileExplorerDllExporter/dllmain.cpp (current CLSIDs) and
+        // src/modules/previewpane/powerpreview/CLSID.h (SHIM-activate and managed CLSIDs of earlier builds).
+        // Edge: "Microsoft PDF Previewer" registered under HKLM\...\PreviewHandlers.
+        const std::unordered_set<std::wstring> kBlockedClsids{
+            // dllmain.cpp: Bgcode, Gcode, Markdown, Monaco, Pdf, Qoi, Svg
+            L"{0e6d5bdd-d5f8-4692-a089-8bb88cdd37f4}", L"{a0257634-8812-4ce8-af11-fa69acaeafae}",
+            L"{60789d87-9c3c-44af-b18c-3de2c2820ed3}", L"{d8034cfa-f34b-41fe-ad45-62fcbb52a6da}",
+            L"{a5a41cc7-02cb-41d4-8c9b-9087040d6098}", L"{729b72cd-b72e-4fe9-bcbf-e954b33fe699}",
+            L"{fcdd4eed-41aa-492f-8a84-31a1546226e0}",
+            // CLSID.h: SHIM-activate Svg, Md, Pdf, Gcode, Bgcode, Qoi
+            L"{74619bda-a66b-451d-864c-a7726f5fe650}", L"{e0907a95-6f9a-4d1b-a97a-7d9d2648881e}",
+            L"{4f6d533b-4185-43a6-ad75-9b20034b14ca}", L"{516cb24f-562f-422f-8b01-6b580474d093}",
+            L"{8fae8d5d-6bd1-46b4-a74f-cbebba4c7b62}", L"{f498be36-5c94-4ec9-a65a-ad1cf4c38271}",
+            // CLSID.h: managed Svg, Md, Pdf, Gcode, Bgcode, Qoi
+            L"{ddee2b8a-6807-48a6-bb20-2338174ff779}", L"{45769bcc-e8fd-42d0-947e-02beef77a1f5}",
+            L"{07665729-6243-4746-95b7-79579308d1b2}", L"{ec52dea8-7c9f-4130-a77b-1737d0418507}",
+            L"{dd8de316-7b01-48e7-ba21-e92c646704af}", L"{8aa07897-c30b-4543-865b-00a0e5a1b32d}",
+            // Edge PDF previewer
+            L"{3a84f9c2-6164-485c-a7d9-4b27f8ac009e}"};
+
+        // Managed (mscoree.dll) handlers that were reviewed and are allowed to be hosted.
+        const std::unordered_set<std::wstring> kManagedAllowList{};
+
         struct WicExtensions
         {
             std::mutex mutex;
@@ -182,14 +206,26 @@ namespace fastlook::core
         return ExecutableOf(ReadDefaultValue(base + L"\\LocalServer32"));
     }
 
-    bool IsBlockedPreviewHandler(std::wstring_view, std::wstring_view serverPath)
+    bool IsBlockedPreviewHandler(std::wstring_view clsid, std::wstring_view serverPath)
     {
-        // PowerToys File Explorer Preview and the Edge PDF handler live under their install dirs; the
-        // MSHTML-based handlers load a browser engine. A path rule covers every CLSID registered here.
+        // Fail closed: a handler whose server cannot be resolved is not hosted (own previewer or fallback instead).
+        if (serverPath.empty())
+            return true;
+
+        if (kBlockedClsids.contains(LowerAscii(clsid)))
+            return true;
+
+        // PowerToys File Explorer Preview and the Edge PDF handler live under their install dirs.
         std::wstring path = LowerAscii(serverPath);
         if (path.find(L"\\powertoys\\") != std::wstring::npos || path.find(L"\\microsoft\\edge\\") != std::wstring::npos)
             return true;
+
         std::wstring_view file = BaseName(path);
-        return file == L"inetcomm.dll" || file == L"mshtml.dll";
+        if (file == L"inetcomm.dll" || file == L"mshtml.dll") // MSHTML-based
+            return true;
+        // Managed (.NET) handlers are registered through mscoree.dll and usually embed WebView2.
+        if (file == L"mscoree.dll")
+            return !kManagedAllowList.contains(LowerAscii(clsid));
+        return false;
     }
 }
