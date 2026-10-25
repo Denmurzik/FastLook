@@ -5,11 +5,11 @@
 
 namespace fastlook::viewer
 {
-    void ForceForeground(HWND hwnd)
+    bool ForceForeground(HWND hwnd)
     {
         if (hwnd == nullptr)
         {
-            return;
+            return false;
         }
         INPUT inputs[2]{};
         inputs[0].type = INPUT_KEYBOARD;
@@ -18,6 +18,6 @@ namespace fastlook::viewer
         inputs[1] = inputs[0];
         inputs[1].ki.dwFlags = KEYEVENTF_KEYUP;
         SendInput(2, inputs, sizeof(INPUT));
-        SetForegroundWindow(hwnd);
+        return SetForegroundWindow(hwnd) != FALSE;
     }
 }

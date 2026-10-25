@@ -51,7 +51,8 @@ namespace fastlook::viewer
 
         // Effective settings: the saved ones with the command-line theme override applied.
         core::Settings const& Settings() const { return m_settings; }
-        void SaveSettings(core::Settings const& settings);
+        // False when nothing was written (the file on disk could not be read, or the write failed).
+        bool SaveSettings(core::Settings const& settings);
         void ReloadSettings(); // applies the theme
 
         void SetCallbacks(HostCallbacks callbacks) { m_callbacks = std::move(callbacks); }
@@ -91,6 +92,8 @@ namespace fastlook::viewer
         // Creates the window on first use.
         winrt::FastLook::implementation::PreviewWindow* Window();
         void ExitApp();
+        // Closes the preview window and every pinned window for good (no hide-instead-of-close); the exit sequence uses it.
+        void CloseAllWindows();
 
     private:
         struct PinnedWindow;

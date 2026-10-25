@@ -105,7 +105,7 @@ namespace fastlook::viewer
         return background.R < 128;
     }
 
-    void ViewerHost::SaveSettings(core::Settings const& settings)
+    bool ViewerHost::SaveSettings(core::Settings const& settings)
     {
         m_doc.values = settings;
         if (m_args.theme && settings.general.theme == *m_args.theme)
@@ -113,16 +113,18 @@ namespace fastlook::viewer
             // The command-line theme is a session override, not a user choice: keep what is on disk.
             m_doc.values.general.theme = core::LoadSettings(m_paths.settingsFile).values.general.theme;
         }
+        // readFailed: the file exists but was unreadable, so writing would destroy the user's settings.
         bool const saved = core::SaveSettings(m_paths.settingsFile, m_doc);
         if (!saved)
         {
-            FL_LOG_INFO(L"Saving settings failed");
+            FL_LOG_INFO(L"Saving settings failed{}", m_doc.readFailed ? L" (the file could not be read)" : L"");
         }
         ApplySettings();
         if (saved && m_callbacks.settingsSaved)
         {
             m_callbacks.settingsSaved();
         }
+        return saved;
     }
 
     void ViewerHost::ReloadSettings()
@@ -156,6 +158,29 @@ namespace fastlook::viewer
     {
         m_exiting = true;
         winrt::Microsoft::UI::Xaml::Application::Current().Exit();
+    }
+
+    void ViewerHost::CloseAllWindows()
+    {
+        m_exiting = true;
+        auto const close = [](winrt::FastLook::PreviewWindow const& window) {
+            try
+            {
+                if (window)
+                {
+                    window.Close();
+                }
+            }
+            catch (...)
+            {
+                FL_LOG_INFO(L"Closing a window failed");
+            }
+        };
+        close(m_window);
+        for (auto const& pinned : m_pinned)
+        {
+            close(pinned->window);
+        }
     }
 
     void ViewerHost::Show(core::ipc::ShowPayload const& payload)
