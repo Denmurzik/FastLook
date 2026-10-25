@@ -91,6 +91,7 @@ namespace fastlook::viewer
         std::vector<uint32_t> VisibleIndices() const;
         void QueuePump();
         void PumpRenders();
+        uint64_t Grantable(uint32_t index, uint64_t wanted, std::vector<uint32_t> const& visible) const;
         uint64_t Reserve(uint32_t index, uint64_t wanted, std::vector<uint32_t> const& visible);
         void ReleaseReservation(uint32_t index);
         void Evict(uint32_t index);

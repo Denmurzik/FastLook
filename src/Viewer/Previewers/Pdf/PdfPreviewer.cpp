@@ -499,7 +499,10 @@ namespace fastlook::viewer
             {
                 m_lru.Touch(index);
                 // Squeezed earlier, and the visible count has dropped since: re-render sharper (the old image stays until then).
-                if (rendered->second.px * 5 >= wanted * 4)
+                // Judged on what a render would really produce (width cap, budget), and before anything is evicted.
+                uint32_t const achievableWidth = WidthForPixels(index, Grantable(index, wanted, visible));
+                auto const achievable = static_cast<uint64_t>(achievableWidth * static_cast<double>(achievableWidth) * PageAspect(index));
+                if (achievable * 4 < rendered->second.px * 5)
                 {
                     continue;
                 }
@@ -508,18 +511,40 @@ namespace fastlook::viewer
             {
                 break; // the next finish pumps again
             }
-            uint64_t const previousPx = rendered != m_rendered.end() ? rendered->second.px : 0;
             wanted = Reserve(index, wanted, visible);
-            if (previousPx != 0 && wanted * 4 < previousPx * 5)
-            {
-                continue; // the budget still allows no sharper image
-            }
             uint32_t const widthPx = WidthForPixels(index, wanted);
             auto job = std::make_shared<RenderJob>();
             uint64_t const id = ++m_nextRenderId;
             m_rendering[index] = Rendering{id, wanted, job};
             RenderPage(index, m_generation, id, widthPx, job);
         }
+    }
+
+    // What Reserve would grant, without evicting anything: pages on screen keep their pixels, everything else can make room.
+    uint64_t PdfPreviewer::Grantable(uint32_t index, uint64_t wanted, std::vector<uint32_t> const& visible) const
+    {
+        uint64_t held = 0;
+        for (uint32_t const page : visible)
+        {
+            if (page == index)
+            {
+                continue;
+            }
+            if (auto it = m_rendered.find(page); it != m_rendered.end())
+            {
+                held += it->second.px;
+            }
+            if (auto it = m_rendering.find(page); it != m_rendering.end())
+            {
+                held += it->second.px;
+            }
+        }
+        auto const budget = static_cast<uint64_t>(kBudgetPixels);
+        if (held + wanted <= budget)
+        {
+            return wanted;
+        }
+        return std::max<uint64_t>(static_cast<uint64_t>(kFloorPixels), budget > held ? budget - held : 0);
     }
 
     // Makes room for a render of up to `wanted` pixels by evicting pages that are not visible; returns the pixels granted
