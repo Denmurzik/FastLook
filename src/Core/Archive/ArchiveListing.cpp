@@ -34,7 +34,10 @@ namespace fastlook::core
         // libarchive's seekable ZIP reader loads the whole central directory; a bigger one is read as a stream instead.
         constexpr uint32_t kMaxSeekableZipEntries = 60000;
         constexpr uint64_t kMaxSeekableZipDirectoryBytes = 8u * 1024 * 1024; // measured on the file, not taken from the end record
-        constexpr uint64_t kMaxSevenZipHeaderBytes = 16u * 1024 * 1024;     // encoded and decoded
+        constexpr uint64_t kMaxSevenZipHeaderBytes = 16u * 1024 * 1024;     // encoded, and decoded size of an encoded header
+        // libarchive sizes per-file arrays by the declared file count, which only the header bytes bound (>= 4 bytes per file):
+        // a plain header is capped lower than a decoded one, which real archives need for 100 000+ entries.
+        constexpr uint64_t kMaxPlainSevenZipHeaderBytes = 4u * 1024 * 1024;
         constexpr DWORD kEocdSearchBytes = 22 + 65535;
 
         // The reading side: a file handle behind libarchive's callbacks. Every callback checks the deadline and the stop token,
@@ -214,6 +217,7 @@ namespace fastlook::core
         {
             constexpr uint64_t kMaxFolders = 64;
             constexpr uint64_t kMaxCoders = 32;
+            constexpr uint64_t kMaxStreams = 1024;
             SevenZipReader r{bytes};
             if (r.Byte() != 0x17)
             {
@@ -232,7 +236,7 @@ namespace fastlook::core
                 {
                     if (id == 0x09) // sizes
                     {
-                        for (uint64_t i = 0; i < packStreams; ++i)
+                        for (uint64_t i = 0; i < packStreams && !r.failed; ++i)
                         {
                             r.Number();
                         }
@@ -278,6 +282,10 @@ namespace fastlook::core
                     {
                         in += r.Number();
                         out += r.Number();
+                        if (in > kMaxStreams || out > kMaxStreams)
+                        {
+                            return std::nullopt; // also stops a declared 2^62 streams before any loop runs on it
+                        }
                     }
                     else
                     {
@@ -293,19 +301,19 @@ namespace fastlook::core
                         return std::nullopt; // alternative methods: not produced by any known writer
                     }
                 }
-                if (out == 0 || in < out - 1 || out > 1024)
+                if (r.failed || out == 0 || in < out - 1 || in > kMaxStreams || out > kMaxStreams)
                 {
                     return std::nullopt;
                 }
                 uint64_t const bindPairs = out - 1;
-                for (uint64_t b = 0; b < bindPairs * 2; ++b)
+                for (uint64_t b = 0; b < bindPairs * 2 && !r.failed; ++b)
                 {
                     r.Number();
                 }
                 uint64_t const packed = in - bindPairs;
                 if (packed > 1)
                 {
-                    for (uint64_t k = 0; k < packed; ++k)
+                    for (uint64_t k = 0; k < packed && !r.failed; ++k)
                     {
                         r.Number();
                     }
@@ -385,7 +393,7 @@ namespace fastlook::core
             }
             if (head[0] != 0x17)
             {
-                return false; // a plain header: bounded by its declared size
+                return headerSize > kMaxPlainSevenZipHeaderBytes; // a plain header
             }
             auto const largest = LargestEncodedHeaderSize(head);
             return !largest || *largest > kMaxSevenZipHeaderBytes;

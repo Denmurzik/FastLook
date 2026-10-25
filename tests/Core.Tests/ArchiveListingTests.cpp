@@ -453,6 +453,33 @@ TEST(ArchiveListing, SevenZipEncodedHeaderThatCannotBeParsedIsRefused)
     EXPECT_TRUE(l.headerTooLarge);
 }
 
+TEST(ArchiveListing, SevenZipHeaderDeclaringAstronomicalStreamCountReturnsAtOnce)
+{
+    std::string h;
+    h.push_back(0x17);
+    h.push_back(0x07);
+    h.push_back(0x0B);
+    Put7z(h, 1);
+    h.push_back(0);
+    Put7z(h, 1);       // one coder
+    h.push_back(0x10); // complex: counts follow
+    Put7z(h, 1ull << 62);
+    Put7z(h, 1);
+    auto const file = WriteTemp(L"streams.7z", BuildSevenZip(h, h.size()));
+    auto const t0 = steady_clock::now();
+    auto const l = ListArchive(file, {}, {});
+    EXPECT_LT(steady_clock::now() - t0, milliseconds(50));
+    EXPECT_TRUE(l.headerTooLarge);
+}
+
+TEST(ArchiveListing, SevenZipPlainHeaderBiggerThanFourMegabytesIsRefused)
+{
+    std::string header(5u * 1024 * 1024, '\0');
+    header[0] = 1; // a plain Header
+    auto const l = ListArchive(WriteTemp(L"plain-big.7z", BuildSevenZip(header, header.size())), {}, {});
+    EXPECT_TRUE(l.headerTooLarge);
+}
+
 TEST(ArchiveListing, RealSevenZipIsNotRefused)
 {
     EXPECT_FALSE(ListArchive(FixturePath("archive/sample.7z"), {}, {}).headerTooLarge);
