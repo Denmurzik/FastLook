@@ -26,6 +26,41 @@ namespace
     constexpr wchar_t kRepositoryUrl[] = L"https://github.com/Denmurzik/FastLook";
     constexpr wchar_t kNoticesFile[] = L"THIRD_PARTY_NOTICES.txt";
 
+    void Open(std::wstring const& path, fastlook::viewer::WeakBar const& error)
+    {
+        std::error_code ec;
+        bool opened = false;
+        if (std::filesystem::exists(path, ec))
+        {
+            // "open" on a folder shows it in Explorer, on the notices file in the default text viewer.
+            opened = reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
+        }
+        if (opened)
+        {
+            fastlook::viewer::ShowSaveResult(error, true);
+        }
+        else
+        {
+            FL_LOG_INFO(L"Opening a settings link failed");
+            fastlook::viewer::ShowError(error, L"OpenFailed");
+        }
+    }
+
+    // Parameters are by value: they are used after the first co_await.
+    fire_and_forget CheckUpdates(Button button, XamlRoot root)
+    {
+        button.IsEnabled(false);
+        try
+        {
+            co_await fastlook::viewer::CheckForUpdatesInteractive(root);
+        }
+        catch (...)
+        {
+            FL_LOG_INFO(L"Update check from settings failed");
+        }
+        button.IsEnabled(true);
+    }
+
     Button MakeButton(hstring const& text)
     {
         Button button;
@@ -47,6 +82,7 @@ namespace winrt::FastLook::implementation
         auto rows = Rows().Children();
         m_error = MakeErrorBar();
         rows.Append(m_error);
+        WeakBar const error = make_weak(m_error);
 
         StackPanel header;
         header.Spacing(2);
@@ -66,7 +102,10 @@ namespace winrt::FastLook::implementation
         rows.Append(header);
 
         auto check = MakeButton(Str(L"Settings", L"CheckUpdates"));
-        check.Click([this](auto const& sender, auto const&) { OnCheckUpdates(sender.template as<Button>()); });
+        check.Click([](auto const& sender, auto const&) {
+            auto const button = sender.template as<Button>();
+            CheckUpdates(button, button.XamlRoot());
+        });
         rows.Append(MakeSettingsRow(Str(L"Settings", L"CheckUpdates"), Str(L"Settings", L"CheckUpdatesDesc"), check));
 
         HyperlinkButton link;
@@ -75,48 +114,11 @@ namespace winrt::FastLook::implementation
         rows.Append(MakeSettingsRow(Str(L"Settings", L"GitHub"), {}, link));
 
         auto notices = MakeButton(Str(L"Settings", L"ThirdParty"));
-        notices.Click([this](auto const&, auto const&) { Open((core::CurrentAppPaths().exeDir / kNoticesFile).wstring()); });
+        notices.Click([error](auto const&, auto const&) { Open((core::CurrentAppPaths().exeDir / kNoticesFile).wstring(), error); });
         rows.Append(MakeSettingsRow(Str(L"Settings", L"ThirdParty"), {}, notices));
 
         auto logs = MakeButton(Str(L"Settings", L"OpenLogs"));
-        logs.Click([this](auto const&, auto const&) { Open(core::CurrentAppPaths().logsDir.wstring()); });
+        logs.Click([error](auto const&, auto const&) { Open(core::CurrentAppPaths().logsDir.wstring(), error); });
         rows.Append(MakeSettingsRow(Str(L"Settings", L"OpenLogs"), {}, logs));
-    }
-
-    void SettingsAboutPage::Open(std::wstring const& path)
-    {
-        std::error_code ec;
-        bool opened = false;
-        if (std::filesystem::exists(path, ec))
-        {
-            // "open" on a folder shows it in Explorer, on the notices file in the default text viewer.
-            opened = reinterpret_cast<INT_PTR>(ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL)) > 32;
-        }
-        if (opened)
-        {
-            m_error.IsOpen(false);
-        }
-        else
-        {
-            FL_LOG_INFO(L"Opening a settings link failed");
-            ShowError(m_error, L"OpenFailed");
-        }
-    }
-
-    fire_and_forget SettingsAboutPage::OnCheckUpdates(Button const& button)
-    {
-        auto self = get_strong();
-        auto const root = XamlRoot();
-        auto const target = button; // by-value copy: the parameter is a reference
-        target.IsEnabled(false);
-        try
-        {
-            co_await CheckForUpdatesInteractive(root);
-        }
-        catch (...)
-        {
-            FL_LOG_INFO(L"Update check from settings failed");
-        }
-        target.IsEnabled(true);
     }
 }

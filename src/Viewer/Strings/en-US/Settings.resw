@@ -138,8 +138,11 @@
   <data name="OpenLogs" xml:space="preserve">
     <value>Open logs folder</value>
   </data>
-  <data name="PeekDismiss" xml:space="preserve">
-    <value>Don't show again</value>
+  <data name="PeekToggle" xml:space="preserve">
+    <value>Warn about PowerToys Peek</value>
+  </data>
+  <data name="PeekToggleDesc" xml:space="preserve">
+    <value>Shows a warning when Peek uses the same activation key</value>
   </data>
   <data name="PeekWarning" xml:space="preserve">
     <value>PowerToys Peek is turned on and uses {0} as well. Choose another activation key here or change it in PowerToys.</value>

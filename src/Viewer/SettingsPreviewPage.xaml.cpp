@@ -38,11 +38,12 @@ namespace winrt::FastLook::implementation
         auto rows = Rows().Children();
         m_error = MakeErrorBar();
         rows.Append(m_error);
+        WeakBar const error = make_weak(m_error);
 
-        auto const toggleRow = [this](wchar_t const* key, wchar_t const* descriptionKey, bool on, bool core::PreviewSettings::*member) {
-            return MakeSettingsRow(Str(L"Settings", key), Str(L"Settings", descriptionKey), MakeToggle(on, [this, member](bool value) {
+        auto const toggleRow = [error](wchar_t const* key, wchar_t const* descriptionKey, bool on, bool core::PreviewSettings::*member) {
+            return MakeSettingsRow(Str(L"Settings", key), Str(L"Settings", descriptionKey), MakeToggle(on, [error, member](bool value) {
                                        bool const ok = CommitSettings([member, value](core::Settings& s) { s.preview.*member = value; });
-                                       ShowSaveResult(m_error, ok);
+                                       ShowSaveResult(error, ok);
                                        return ok;
                                    }));
         };
@@ -57,7 +58,7 @@ namespace winrt::FastLook::implementation
         fontSize.ValidationMode(NumberBoxValidationMode::InvalidInputOverwritten);
         fontSize.Width(140);
         fontSize.Value(std::clamp<double>(preview.codeFontSize, kMinFontSize, kMaxFontSize));
-        fontSize.ValueChanged([this](NumberBox const& box, NumberBoxValueChangedEventArgs const& args) {
+        fontSize.ValueChanged([error](NumberBox const& box, NumberBoxValueChangedEventArgs const& args) {
             double const value = args.NewValue();
             if (std::isnan(value))
             {
@@ -65,24 +66,26 @@ namespace winrt::FastLook::implementation
                 return;
             }
             auto const size = static_cast<uint32_t>(std::lround(std::clamp(value, kMinFontSize, kMaxFontSize)));
-            ShowSaveResult(m_error, CommitSettings([size](core::Settings& s) { s.preview.codeFontSize = size; }));
+            bool const ok = CommitSettings([size](core::Settings& s) { s.preview.codeFontSize = size; });
+            ShowSaveResult(error, ok);
+            if (!ok && !std::isnan(args.OldValue()))
+            {
+                box.Value(args.OldValue()); // roll back; the re-entrant change saves the old size again
+            }
         });
         rows.Append(MakeSettingsRow(Str(L"Settings", L"CodeFontSize"), Str(L"Settings", L"CodeFontSizeDesc"), fontSize));
 
         rows.Append(toggleRow(L"Autoplay", L"AutoplayDesc", preview.autoplayMedia, &core::PreviewSettings::autoplayMedia));
         rows.Append(toggleRow(L"ShellHandlers", L"ShellHandlersDesc", preview.useShellHandlers, &core::PreviewSettings::useShellHandlers));
 
-        auto markdownCombo = MakeCombo({Str(L"Settings", L"MarkdownRendered"), Str(L"Settings", L"MarkdownSource")},
-                                       preview.markdownView == core::MarkdownView::Source ? 1 : 0);
-        markdownCombo.SelectionChanged([this, markdownCombo](auto const&, auto const&) {
-            int const index = markdownCombo.SelectedIndex();
-            if (index < 0)
-            {
-                return;
-            }
-            auto const view = index == 1 ? core::MarkdownView::Source : core::MarkdownView::Rendered;
-            ShowSaveResult(m_error, CommitSettings([view](core::Settings& s) { s.preview.markdownView = view; }));
-        });
-        rows.Append(MakeSettingsRow(Str(L"Settings", L"MarkdownView"), Str(L"Settings", L"MarkdownViewDesc"), markdownCombo));
+        rows.Append(MakeSettingsRow(
+            Str(L"Settings", L"MarkdownView"), Str(L"Settings", L"MarkdownViewDesc"),
+            MakeCombo({Str(L"Settings", L"MarkdownRendered"), Str(L"Settings", L"MarkdownSource")},
+                      preview.markdownView == core::MarkdownView::Source ? 1 : 0, [error](int index) {
+                          auto const view = index == 1 ? core::MarkdownView::Source : core::MarkdownView::Rendered;
+                          bool const ok = CommitSettings([view](core::Settings& s) { s.preview.markdownView = view; });
+                          ShowSaveResult(error, ok);
+                          return ok;
+                      })));
     }
 }

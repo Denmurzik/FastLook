@@ -72,7 +72,7 @@ namespace fastlook::viewer
         return toggle;
     }
 
-    ComboBox MakeCombo(std::initializer_list<hstring> items, int selected)
+    ComboBox MakeCombo(std::initializer_list<hstring> items, int selected, std::function<bool(int)> apply)
     {
         ComboBox combo;
         combo.MinWidth(180);
@@ -81,6 +81,30 @@ namespace fastlook::viewer
             combo.Items().Append(box_value(item));
         }
         combo.SelectedIndex(selected);
+        struct State
+        {
+            int current;
+            bool reverting = false;
+        };
+        auto const state = std::make_shared<State>(State{selected});
+        combo.SelectionChanged([apply = std::move(apply), state](Windows::Foundation::IInspectable const& sender, SelectionChangedEventArgs const&) {
+            auto const self = sender.as<ComboBox>();
+            int const index = self.SelectedIndex();
+            if (state->reverting || index < 0)
+            {
+                return;
+            }
+            if (apply(index))
+            {
+                state->current = index;
+            }
+            else
+            {
+                state->reverting = true;
+                self.SelectedIndex(state->current);
+                state->reverting = false;
+            }
+        });
         return combo;
     }
 
@@ -92,22 +116,28 @@ namespace fastlook::viewer
         return bar;
     }
 
-    void ShowError(InfoBar const& bar, std::wstring_view key)
+    void ShowError(WeakBar const& weak, std::wstring_view key)
     {
-        bar.Severity(InfoBarSeverity::Error);
-        bar.Title(Str(L"Settings", key));
-        bar.IsOpen(true);
+        if (auto const bar = weak.get())
+        {
+            bar.Severity(InfoBarSeverity::Error);
+            bar.Title(Str(L"Settings", key));
+            bar.IsOpen(true);
+        }
     }
 
-    void ShowSaveResult(InfoBar const& bar, bool saved)
+    void ShowSaveResult(WeakBar const& weak, bool saved)
     {
         if (saved)
         {
-            bar.IsOpen(false);
+            if (auto const bar = weak.get())
+            {
+                bar.IsOpen(false);
+            }
         }
         else
         {
-            ShowError(bar, L"SaveFailed");
+            ShowError(weak, L"SaveFailed");
         }
     }
 

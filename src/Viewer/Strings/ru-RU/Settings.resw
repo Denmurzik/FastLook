@@ -138,8 +138,11 @@
   <data name="OpenLogs" xml:space="preserve">
     <value>Открыть папку журналов</value>
   </data>
-  <data name="PeekDismiss" xml:space="preserve">
-    <value>Больше не показывать</value>
+  <data name="PeekToggle" xml:space="preserve">
+    <value>Предупреждать о PowerToys Peek</value>
+  </data>
+  <data name="PeekToggleDesc" xml:space="preserve">
+    <value>Показывать предупреждение, если Peek использует ту же клавишу вызова</value>
   </data>
   <data name="PeekWarning" xml:space="preserve">
     <value>PowerToys Peek включён и тоже использует {0}. Выберите здесь другую клавишу вызова или измените её в PowerToys.</value>
