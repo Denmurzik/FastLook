@@ -39,6 +39,11 @@ namespace fastlook::core
         LineSpan Line(uint64_t n, std::span<const uint8_t> content) const;
         uint64_t LineFromOffset(uint64_t byteOffset, std::span<const uint8_t> content) const;
 
+        // Row `n` -> number of the logical line it belongs to: continuation rows (segments of a line longer than
+        // kMaxLineUnits) share the number of the row that started them. Scans like Line(); rows past the end map
+        // to the last logical line.
+        uint64_t LogicalLine(uint64_t n, std::span<const uint8_t> content) const;
+
     private:
         struct Impl;
         std::unique_ptr<Impl> m_;

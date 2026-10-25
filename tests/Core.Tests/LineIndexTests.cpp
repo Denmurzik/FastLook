@@ -237,3 +237,44 @@ TEST(LineIndex, ConcurrentReadersDuringAppend)
     reader.join();
     EXPECT_EQ(ix.LineCount(), 20001u);
 }
+
+TEST(LineIndex, LogicalLineSkipsContinuationRows)
+{
+    // line 0 splits into 3 rows, line 1 is short, line 2 splits into 2 rows.
+    std::string s = std::string(40000, 'x') + "\nshort\n" + std::string(20000, 'y');
+    LineIndex ix({});
+    ix.Append(B(s), true);
+    auto c = B(s);
+    ASSERT_EQ(ix.LineCount(), 6u);
+    uint64_t const expected[] = {0, 0, 0, 1, 2, 2};
+    for (uint64_t n = 0; n < 6; ++n) EXPECT_EQ(ix.LogicalLine(n, c), expected[n]) << n;
+    EXPECT_EQ(ix.LogicalLine(99, c), 2u);
+}
+
+TEST(LineIndex, LogicalLineAcrossCheckpoints)
+{
+    // 100 plain lines, a line of 3 rows, then plain lines: the split crosses the checkpoint at row 128.
+    std::string s;
+    for (int i = 0; i < 126; ++i) s += "a\n";
+    s += std::string(40000, 'x') + "\n"; // rows 126, 127, 128
+    for (int i = 0; i < 200; ++i) s += "b\n";
+    LineIndex ix({});
+    ix.Append(B(s), true);
+    auto c = B(s);
+    EXPECT_EQ(ix.LogicalLine(125, c), 125u);
+    EXPECT_EQ(ix.LogicalLine(126, c), 126u);
+    EXPECT_EQ(ix.LogicalLine(127, c), 126u);
+    EXPECT_EQ(ix.LogicalLine(128, c), 126u); // continuation row that is itself a checkpoint
+    EXPECT_EQ(ix.LogicalLine(129, c), 127u);
+    EXPECT_EQ(ix.LogicalLine(129 + 150, c), 127u + 150u);
+}
+
+TEST(LineIndex, LogicalLineEqualsRowWithoutSplits)
+{
+    std::string s;
+    for (int i = 0; i < 1000; ++i) s += "L" + std::to_string(i) + "\n";
+    LineIndex ix({});
+    ix.Append(B(s), true);
+    auto c = B(s);
+    for (uint64_t n : {0u, 1u, 63u, 64u, 65u, 500u, 1000u}) EXPECT_EQ(ix.LogicalLine(n, c), n);
+}

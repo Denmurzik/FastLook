@@ -13,6 +13,7 @@ namespace fastlook::core
         {
             uint64_t offset = 0;
             bool continuation = false;
+            uint64_t logicalBefore = 0; // logical lines started by the rows before this one
         };
 
         enum class Unit
@@ -161,13 +162,14 @@ namespace fastlook::core
 
     struct LineIndex::Impl
     {
-        explicit Impl(EncodingInfo i) : unit(UnitOf(i)), scanner(unit, 0) { checkpoints.push_back({0, false}); }
+        explicit Impl(EncodingInfo i) : unit(UnitOf(i)), scanner(unit, 0) { checkpoints.push_back({0, false, 0}); }
 
         Unit unit;
         mutable std::shared_mutex mutex;
         Scanner scanner;
         std::vector<Checkpoint> checkpoints; // line k * kCheckpointEvery starts at checkpoints[k]
         uint64_t finished = 0;               // lines already terminated
+        uint64_t logicalStarted = 1;         // non-continuation rows among rows 0..finished (the open row included)
         bool complete = false;
     };
 
@@ -179,9 +181,11 @@ namespace fastlook::core
         std::unique_lock lock(m_->mutex);
         if (m_->complete) return;
         auto onLine = [this](uint64_t, uint64_t nextBegin, bool nextContinuation) {
-            if (++m_->finished % kCheckpointEvery == 0)
+            ++m_->finished;
+            if (!nextContinuation) ++m_->logicalStarted;
+            if (m_->finished % kCheckpointEvery == 0)
             {
-                m_->checkpoints.push_back({nextBegin, nextContinuation});
+                m_->checkpoints.push_back({nextBegin, nextContinuation, m_->logicalStarted - (nextContinuation ? 0 : 1)});
             }
             return true;
         };
@@ -241,6 +245,31 @@ namespace fastlook::core
         span.begin = (std::min)(span.begin, size);
         span.end = (std::max)(span.begin, (std::min)(span.end, size));
         return span;
+    }
+
+    uint64_t LineIndex::LogicalLine(uint64_t n, std::span<const uint8_t> content) const
+    {
+        uint64_t const size = content.size();
+        Checkpoint cp;
+        {
+            std::shared_lock lock(m_->mutex);
+            if (n > m_->finished) return m_->logicalStarted - 1;
+            cp = m_->checkpoints[static_cast<size_t>(n / kCheckpointEvery)];
+        }
+        // Logical lines started up to and including the checkpoint row.
+        uint64_t started = cp.logicalBefore + (cp.continuation ? 0 : 1);
+        if (cp.offset > size) return started == 0 ? 0 : started - 1;
+
+        uint64_t remaining = n % kCheckpointEvery;
+        auto onLine = [&](uint64_t, uint64_t, bool nextContinuation) {
+            if (remaining == 0) return false;
+            --remaining;
+            if (!nextContinuation) ++started;
+            return true;
+        };
+        Scanner scanner(m_->unit, cp.offset);
+        if (scanner.Feed(content.subspan(static_cast<size_t>(cp.offset)), onLine)) scanner.Finish(onLine);
+        return started == 0 ? 0 : started - 1;
     }
 
     uint64_t LineIndex::LineFromOffset(uint64_t byteOffset, std::span<const uint8_t> content) const

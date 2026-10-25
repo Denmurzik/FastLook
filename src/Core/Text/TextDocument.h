@@ -43,7 +43,7 @@ namespace fastlook::core
         uint64_t SizeBytes() const { return size_; }
         std::span<const uint8_t> Content() const { return content_; } // after the BOM; raw, unguarded
 
-        // Indexes in 4 MiB chunks; stops early (resumable) on stop request or fault. `progress` runs after every
+        // Indexes in 4 MiB chunks (a 64 KiB first one); stops early (resumable) on stop request or fault. `progress` runs after every
         // chunk. Single caller only: never run BuildIndex concurrently with itself.
         void BuildIndex(std::stop_token stop, std::function<void(uint64_t lines, bool complete)> progress);
         uint64_t LineCount() const { return index_.LineCount(); }
@@ -54,6 +54,9 @@ namespace fastlook::core
         std::wstring LineText(uint64_t line) const;                // decoded, no EOL
         // Same, and reports whether the row is a continuation segment of a longer line. False when the file faulted.
         bool LineText(uint64_t line, std::wstring& text, bool& continuation) const { return ReadLine(line, text, continuation); }
+        // Number of the logical line (continuation segments share their line's number) that row `row` belongs to. False when
+        // the file faulted.
+        bool LogicalLine(uint64_t row, uint64_t& logical) const;
         std::wstring ExtractRange(TextPos from, TextPos to) const; // lines joined with L"\r\n", continuation segments joined directly
         LineIndex const& Index() const { return index_; }          // Line()/LineFromOffset() on it scan Content() unguarded
 

@@ -177,6 +177,19 @@ namespace fastlook::core
         return text;
     }
 
+    bool TextDocument::LogicalLine(uint64_t row, uint64_t& logical) const
+    {
+        logical = row;
+        if (faulted_) return false;
+        auto scan = [&] { logical = index_.LogicalLine(row, content_); }; // scans raw mapped bytes
+        if (!SafeRun(raw_.data(), raw_.size(), scan))
+        {
+            faulted_ = true;
+            return false;
+        }
+        return true;
+    }
+
     std::wstring TextDocument::ExtractRange(TextPos from, TextPos to) const
     {
         if (to < from) return {};
