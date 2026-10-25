@@ -58,6 +58,10 @@ namespace fastlook::core
         // the file faulted.
         bool LogicalLine(uint64_t row, uint64_t& logical) const;
         std::wstring ExtractRange(TextPos from, TextPos to) const; // lines joined with L"\r\n", continuation segments joined directly
+        // ExtractRange in row batches, stopping once `maxUnits` UTF-16 units are collected (`truncated` tells whether text was cut
+        // off). Every batch is sized so the transient memory stays near the remaining budget, not near the batch limit.
+        // Empty when the file faulted.
+        std::wstring ExtractRangeCapped(TextPos from, TextPos to, size_t maxUnits, bool& truncated, uint64_t maxBatchRows = 2048) const;
         LineIndex const& Index() const { return index_; }          // Line()/LineFromOffset() on it scan Content() unguarded
 
     private:

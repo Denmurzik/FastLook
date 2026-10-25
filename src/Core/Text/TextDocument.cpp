@@ -190,6 +190,46 @@ namespace fastlook::core
         return true;
     }
 
+    std::wstring TextDocument::ExtractRangeCapped(TextPos from, TextPos to, size_t maxUnits, bool& truncated, uint64_t maxBatchRows) const
+    {
+        truncated = false;
+        uint64_t const lines = index_.LineCount();
+        if (to < from || from.line >= lines || maxUnits == 0) return {};
+        if (to.line >= lines)
+        {
+            to.line = lines - 1;
+            to.column = (std::numeric_limits<uint32_t>::max)();
+        }
+        maxBatchRows = (std::max<uint64_t>)(maxBatchRows, 1);
+
+        std::wstring out;
+        for (uint64_t line = from.line; line <= to.line;)
+        {
+            // A row holds at most kMaxLineUnits units, so this many rows cannot overshoot the budget by more than one row.
+            uint64_t const remaining = maxUnits - (std::min)(out.size(), maxUnits);
+            uint64_t const rows = (std::clamp<uint64_t>)(remaining / LineIndex::kMaxLineUnits + 1, 1, maxBatchRows);
+            uint64_t const last = (std::min)(to.line, line + rows - 1);
+            if (line != from.line)
+            {
+                std::wstring probe;
+                bool continuation = false;
+                if (!ReadLine(line, probe, continuation)) return {};
+                if (!continuation) out += L"\r\n";
+            }
+            out += ExtractRange(line == from.line ? from : TextPos{line, 0}, last == to.line ? to : TextPos{last, (std::numeric_limits<uint32_t>::max)()});
+            if (faulted_) return {};
+            if (out.size() >= maxUnits)
+            {
+                truncated = out.size() > maxUnits || last < to.line;
+                out.resize(maxUnits);
+                if (!out.empty() && (out.back() & 0xFC00) == 0xD800) out.pop_back(); // do not cut a surrogate pair
+                break;
+            }
+            line = last + 1;
+        }
+        return out;
+    }
+
     std::wstring TextDocument::ExtractRange(TextPos from, TextPos to) const
     {
         if (to < from) return {};

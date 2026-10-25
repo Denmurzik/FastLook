@@ -52,7 +52,9 @@ namespace fastlook::viewer
         // Selection (mouse press-drag, double-click word, Ctrl+A) is kept as document rows (a continuation segment of a longer
         // line is its own row) and UTF-16 columns. SelectedText is capped at 16 Mi UTF-16 units.
         bool HasSelection() const;
-        std::wstring SelectedText() const;
+        std::wstring SelectedText(bool* truncated = nullptr) const;
+        // Short-lived message in the corner of the view (UI thread).
+        void ShowNotice(std::wstring const& text);
         void SelectAll();
 
         // Scrolling keys: PgUp / PgDn / Home / End. False when the key is not one of them.
@@ -197,6 +199,10 @@ namespace fastlook::viewer
         core::TextPos m_anchor, m_caret;
         bool m_dragging = false;
         double m_pointerX = 0, m_pointerY = 0;
+        winrt::Microsoft::UI::Xaml::Controls::Border m_notice{nullptr};
+        winrt::Microsoft::UI::Xaml::Controls::TextBlock m_noticeText{nullptr};
+        winrt::Microsoft::UI::Dispatching::DispatcherQueueTimer m_noticeTimer{nullptr};
+        winrt::Microsoft::UI::Dispatching::DispatcherQueueTimer::Tick_revoker m_noticeTick;
         winrt::Microsoft::UI::Dispatching::DispatcherQueueTimer m_dragTimer{nullptr};
         winrt::Microsoft::UI::Dispatching::DispatcherQueueTimer::Tick_revoker m_dragTick;
         winrt::Microsoft::UI::Xaml::UIElement::PointerPressed_revoker m_pressed;

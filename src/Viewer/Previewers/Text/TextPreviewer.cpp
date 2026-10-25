@@ -6,6 +6,7 @@
 #include <winrt/Windows.UI.h>
 
 #include "Diagnostics/Log.h"
+#include "Previewers/Common/ShellInfo.h"
 #include "Previewers/Factories.h"
 #include "Ui/Placement.h"
 #include "Util/Async.h"
@@ -224,7 +225,13 @@ namespace fastlook::viewer
         {
             return false;
         }
-        SetClipboardText(m_ctx ? m_ctx->hwnd : nullptr, m_view->SelectedText());
+        bool truncated = false;
+        std::wstring const text = m_view->SelectedText(&truncated);
+        if (SetClipboardText(m_ctx ? m_ctx->hwnd : nullptr, text) && truncated)
+        {
+            FL_LOG_INFO(L"Copied selection truncated to {} characters", text.size());
+            m_view->ShowNotice(FormatPattern(Str(L"Text", L"CopyTruncated"), {FormatNumber(text.size())}));
+        }
         return true;
     }
 

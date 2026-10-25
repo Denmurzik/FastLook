@@ -24,4 +24,7 @@
   <data name="Unreadable" xml:space="preserve">
     <value>The file can no longer be read</value>
   </data>
+  <data name="CopyTruncated" xml:space="preserve">
+    <value>Copied only the first {0} characters</value>
+  </data>
 </root>

@@ -31,7 +31,7 @@ namespace fastlook::viewer
         constexpr size_t kWindowSlackColumns = 64;
         constexpr double kWrapPadRight = 12;
         constexpr size_t kMaxCopyUnits = 16u * 1024 * 1024;
-        constexpr uint64_t kCopyBatchRows = 2048;
+        constexpr int64_t kNoticeMs = 4000;
         constexpr size_t kLineCountCacheMax = 1024;
         constexpr int64_t kDragIntervalMs = 50;
         constexpr double kMaxDragRowsPerTick = 20;
@@ -149,6 +149,11 @@ namespace fastlook::viewer
         m_captureLost.revoke();
         m_doubleTapped.revoke();
         m_dragTick.revoke();
+        m_noticeTick.revoke();
+        if (m_noticeTimer)
+        {
+            m_noticeTimer.Stop();
+        }
         if (m_dragTimer)
         {
             m_dragTimer.Stop();
@@ -232,6 +237,25 @@ namespace fastlook::viewer
             SelectWordAt(point.X, point.Y);
             e.Handled(true);
         });
+        // Notice overlay (copy truncated).
+        m_noticeText = TextBlock{};
+        m_noticeText.TextWrapping(TextWrapping::Wrap);
+        m_notice = Border{};
+        m_notice.Child(m_noticeText);
+        m_notice.Padding({12, 6, 12, 6});
+        m_notice.Margin({0, 0, 12, 12});
+        m_notice.CornerRadius({4, 4, 4, 4});
+        m_notice.HorizontalAlignment(HorizontalAlignment::Right);
+        m_notice.VerticalAlignment(VerticalAlignment::Bottom);
+        m_notice.Visibility(Visibility::Collapsed);
+        m_notice.IsHitTestVisible(false);
+        m_noticeText.Foreground(winrt::Microsoft::UI::Xaml::Media::SolidColorBrush{ToXaml(PaletteFor(m_dark).text)});
+        m_notice.Background(winrt::Microsoft::UI::Xaml::Media::SolidColorBrush{ToXaml(PaletteFor(m_dark).selection)});
+        m_host.Children().Append(m_notice);
+        m_noticeTimer = m_root.DispatcherQueue().CreateTimer();
+        m_noticeTimer.Interval(std::chrono::milliseconds(kNoticeMs));
+        m_noticeTimer.IsRepeating(false);
+        m_noticeTick = m_noticeTimer.Tick(winrt::auto_revoke, [this](auto const&, auto const&) { m_notice.Visibility(Visibility::Collapsed); });
         m_dragTimer = m_root.DispatcherQueue().CreateTimer();
         m_dragTimer.Interval(std::chrono::milliseconds(kDragIntervalMs));
         m_dragTimer.IsRepeating(true);
@@ -346,6 +370,8 @@ namespace fastlook::viewer
         auto const background = winrt::Microsoft::UI::Xaml::Media::SolidColorBrush{ToXaml(PaletteFor(m_dark).background)};
         m_root.Background(background);
         m_host.Background(background);
+        m_noticeText.Foreground(winrt::Microsoft::UI::Xaml::Media::SolidColorBrush{ToXaml(PaletteFor(m_dark).text)});
+        m_notice.Background(winrt::Microsoft::UI::Xaml::Media::SolidColorBrush{ToXaml(PaletteFor(m_dark).selection)});
         Invalidate();
     }
 
@@ -354,64 +380,44 @@ namespace fastlook::viewer
         return m_anchor != m_caret;
     }
 
-    // Copies in row batches so the text is capped (kMaxCopyUnits) however large the selection is; every batch is a guarded
-    // ExtractRange. A faulted file yields nothing.
-    std::wstring CodeView::SelectedText() const
+    // Capped at kMaxCopyUnits (`truncated` says so); a faulted file yields nothing.
+    std::wstring CodeView::SelectedText(bool* truncated) const
     {
-        if (!m_doc || !HasSelection())
+        bool cut = false;
+        std::wstring text;
+        if (m_doc && HasSelection())
         {
-            return {};
+            text = m_doc->ExtractRangeCapped(std::min(m_anchor, m_caret), std::max(m_anchor, m_caret), kMaxCopyUnits, cut);
         }
-        core::TextPos const from = std::min(m_anchor, m_caret);
-        core::TextPos const to = std::max(m_anchor, m_caret);
-        std::wstring out;
-        for (uint64_t line = from.line; line <= to.line; line += kCopyBatchRows)
+        if (truncated)
         {
-            uint64_t const lastLine = std::min(to.line, line + kCopyBatchRows - 1);
-            core::TextPos const batchFrom = line == from.line ? from : core::TextPos{line, 0};
-            core::TextPos const batchTo = lastLine == to.line ? to : core::TextPos{lastLine, (std::numeric_limits<uint32_t>::max)()};
-            if (line != from.line)
-            {
-                std::wstring probe;
-                bool continuation = false;
-                if (!m_doc->LineText(line, probe, continuation))
-                {
-                    return {};
-                }
-                if (!continuation)
-                {
-                    out += L"\r\n";
-                }
-            }
-            out += m_doc->ExtractRange(batchFrom, batchTo);
-            if (m_doc->Faulted())
-            {
-                return {};
-            }
-            if (out.size() >= kMaxCopyUnits)
-            {
-                out.resize(kMaxCopyUnits);
-                if (IS_HIGH_SURROGATE(out.back()))
-                {
-                    out.pop_back();
-                }
-                break;
-            }
-            if (lastLine == to.line)
-            {
-                break;
-            }
+            *truncated = cut;
         }
-        return out;
+        return text;
+    }
+
+    // A short line in the bottom-right corner that fades out by itself.
+    void CodeView::ShowNotice(std::wstring const& text)
+    {
+        if (!m_notice || !m_noticeTimer)
+        {
+            return;
+        }
+        m_noticeText.Text(winrt::hstring{text});
+        m_notice.Visibility(Visibility::Visible);
+        m_noticeTimer.Stop();
+        m_noticeTimer.Start();
     }
 
     void CodeView::SelectAll()
     {
-        if (!m_doc || m_lineCount == 0)
+        // The document's own count: the progress notifications reach the view a little later than the index.
+        uint64_t const lines = m_doc ? m_doc->LineCount() : 0;
+        if (lines == 0)
         {
             return;
         }
-        uint64_t const last = m_lineCount - 1;
+        uint64_t const last = lines - 1;
         std::wstring text;
         bool continuation = false;
         if (!m_doc->LineText(last, text, continuation))
@@ -1201,7 +1207,17 @@ namespace fastlook::viewer
                 marks.emplace_back(y, row.number);
             }
             double const originX = xOrigin + static_cast<double>(rl.base) * m_charW;
-            DrawSelection(frame, first + i, row, rl, originX, y, i + 1 < count && m_cache[static_cast<size_t>(i + 1)].continuation);
+            bool nextIsContinuation = false;
+            if (i + 1 < count)
+            {
+                nextIsContinuation = m_cache[static_cast<size_t>(i + 1)].continuation;
+            }
+            else if (HasSelection() && first + i + 1 < m_lineCount && first + i < std::max(m_anchor, m_caret).line)
+            {
+                std::wstring peek; // the row just below the fetched ones: only the selection stub needs to know
+                m_doc->LineText(first + i + 1, peek, nextIsContinuation);
+            }
+            DrawSelection(frame, first + i, row, rl, originX, y, nextIsContinuation);
 
             if (laidOut)
             {

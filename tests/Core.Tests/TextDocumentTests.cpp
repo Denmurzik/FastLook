@@ -54,6 +54,80 @@ TEST(TextDocument, OpensFixturesWithRightEncoding)
     EXPECT_EQ(crlf->LineText(1), L"two");
 }
 
+namespace
+{
+    std::unique_ptr<TextDocument> ViewOf(std::string const& s)
+    {
+        auto doc = TextDocument::OpenView({reinterpret_cast<const uint8_t*>(s.data()), s.size()});
+        if (doc) doc->BuildIndex({}, {});
+        return doc;
+    }
+
+    // 100 plain lines, a 40000-unit line (3 rows), 100 more lines.
+    std::string SplitLineText()
+    {
+        std::string s;
+        for (int i = 0; i < 100; ++i) s += "a" + std::to_string(i) + "\n";
+        s += std::string(40000, 'x') + "\n";
+        for (int i = 0; i < 100; ++i) s += "b" + std::to_string(i) + "\n";
+        return s;
+    }
+}
+
+TEST(TextDocument, LogicalLineAcrossASplitLine)
+{
+    std::string const s = SplitLineText();
+    auto doc = ViewOf(s);
+    ASSERT_NE(doc, nullptr);
+    uint64_t logical = 99;
+    ASSERT_TRUE(doc->LogicalLine(99, logical));
+    EXPECT_EQ(logical, 99u);
+    for (uint64_t row : {100u, 101u, 102u})
+    {
+        ASSERT_TRUE(doc->LogicalLine(row, logical));
+        EXPECT_EQ(logical, 100u) << row;
+    }
+    ASSERT_TRUE(doc->LogicalLine(103, logical));
+    EXPECT_EQ(logical, 101u);
+    ASSERT_TRUE(doc->LogicalLine(202, logical));
+    EXPECT_EQ(logical, 200u);
+}
+
+TEST(TextDocument, ExtractRangeCappedMatchesExtractRangeForAnyBatching)
+{
+    std::string const s = SplitLineText();
+    auto doc = ViewOf(s);
+    ASSERT_NE(doc, nullptr);
+    TextPos const from{3, 1}, to{150, 2};
+    std::wstring const expected = doc->ExtractRange(from, to);
+    ASSERT_FALSE(expected.empty());
+    // Batches that end and begin on continuation rows (rows 100..102 are one line) must join without a line break.
+    for (uint64_t batch : {1u, 2u, 3u, 7u, 2048u})
+    {
+        bool truncated = true;
+        EXPECT_EQ(doc->ExtractRangeCapped(from, to, expected.size() + 1, truncated, batch), expected) << batch;
+        EXPECT_FALSE(truncated) << batch;
+    }
+}
+
+TEST(TextDocument, ExtractRangeCappedTruncatesAtTheCap)
+{
+    std::string const s = SplitLineText();
+    auto doc = ViewOf(s);
+    ASSERT_NE(doc, nullptr);
+    bool truncated = false;
+    std::wstring const all = doc->ExtractRange({0, 0}, {1000, 0});
+    auto const cut = doc->ExtractRangeCapped({0, 0}, {1000, 0}, 20000, truncated, 2);
+    EXPECT_TRUE(truncated);
+    EXPECT_EQ(cut.size(), 20000u);
+    EXPECT_EQ(cut, all.substr(0, 20000));
+
+    // Exactly the whole text fits: not truncated.
+    auto const exact = doc->ExtractRangeCapped({0, 0}, {1000, 0}, all.size(), truncated, 5);
+    EXPECT_FALSE(truncated);
+    EXPECT_EQ(exact, all);
+}
+
 TEST(TextDocument, MissingFileFailsCleanly)
 {
     EXPECT_EQ(TextDocument::Open(MakeTempDir() / "nope.txt"), nullptr);
