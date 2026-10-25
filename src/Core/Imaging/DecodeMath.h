@@ -22,9 +22,9 @@ namespace fastlook::core
     // Browser behaviour: a frame delay below 20 ms (including 0) plays as 100 ms.
     uint32_t NormalizeFrameDelayMs(uint32_t delayMs);
 
-    // Lead ruling (overrides decision 52's 4096x4096): animate only canvases up to 4 200 000 pixels (covers 2048x2048); larger ones
+    // Lead ruling (overrides decision 52's 4096x4096): animate only canvases up to 3 000 000 pixels (covers 1920x1080 and 1600x1600); larger ones
     // show their first frame through the still path. Checked on header values, before anything is allocated for the canvas.
-    constexpr uint64_t kMaxAnimatedPixels = 4'200'000;
+    constexpr uint64_t kMaxAnimatedPixels = 3'000'000;
     bool CanAnimateCanvas(SizeU canvas);
 
     // Logical screen size from the first 10 bytes of a GIF ("GIF87a"/"GIF89a"); nullopt for anything else.

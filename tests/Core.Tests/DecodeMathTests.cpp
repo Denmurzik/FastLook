@@ -43,10 +43,11 @@ TEST(DecodeMath, FrameDelayNormalization)
 TEST(DecodeMath, AnimationCanvasLimit)
 {
     EXPECT_TRUE(CanAnimateCanvas({64, 48}));
-    EXPECT_TRUE(CanAnimateCanvas({2048, 2048}));
-    EXPECT_TRUE(CanAnimateCanvas({4200, 1000}));
-    EXPECT_FALSE(CanAnimateCanvas({4096, 4096}));
-    EXPECT_FALSE(CanAnimateCanvas({2050, 2050}));
+    EXPECT_TRUE(CanAnimateCanvas({1920, 1080}));
+    EXPECT_TRUE(CanAnimateCanvas({1600, 1600}));
+    EXPECT_TRUE(CanAnimateCanvas({3000, 1000}));
+    EXPECT_FALSE(CanAnimateCanvas({2048, 2048}));
+    EXPECT_FALSE(CanAnimateCanvas({1733, 1733}));
     EXPECT_FALSE(CanAnimateCanvas({65535, 65535}));
     EXPECT_FALSE(CanAnimateCanvas({0xFFFFFFFFu, 0xFFFFFFFFu}));
     EXPECT_FALSE(CanAnimateCanvas({0, 10}));
