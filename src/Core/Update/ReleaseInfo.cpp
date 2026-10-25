@@ -37,6 +37,17 @@ namespace fastlook::core
         }
     }
 
+    namespace
+    {
+        // "https://github.com/Denmurzik/FastLook" (any case) followed by exactly `path`.
+        bool IsOwnReleaseDownload(std::string_view url, std::string_view path)
+        {
+            constexpr std::string_view kRepo = "https://github.com/denmurzik/fastlook";
+            return url.size() > kRepo.size() + path.size() && EqualsLower(url.substr(0, kRepo.size()), kRepo) &&
+                   url.substr(kRepo.size()).starts_with(path);
+        }
+    }
+
     bool IsAllowedUpdateUrl(std::string_view url)
     {
         constexpr std::string_view kScheme = "https://";
@@ -90,7 +101,8 @@ namespace fastlook::core
         std::string const setupName = "FastLook-Setup-" + bare + ".exe";
         std::string const shaName = setupName + ".sha256";
         // Only this repository's own release downloads of this tag count; the redirect target is checked per hop later.
-        std::string const downloadPrefix = "https://github.com/Denmurzik/FastLook/releases/download/" + info.tag + "/";
+        // Owner and repository names are case-insensitive on GitHub; the path after them is compared exactly.
+        std::string const downloadPath = "/releases/download/" + info.tag + "/";
         auto const assets = doc.find("assets");
         if (assets == doc.end() || !assets->is_array())
         {
@@ -104,7 +116,7 @@ namespace fastlook::core
             }
             auto const name = StringField(asset, "name");
             auto const url = StringField(asset, "browser_download_url");
-            if (!url.starts_with(downloadPrefix))
+            if (!IsOwnReleaseDownload(url, downloadPath))
             {
                 continue;
             }

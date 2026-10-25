@@ -9,7 +9,6 @@
 #include <stop_token>
 
 #include "Common/Version.h"
-#include "Crypto/Sha256.h"
 #include "Diagnostics/Log.h"
 #include "System/AppPaths.h"
 #include "Text/Utf.h"
@@ -148,7 +147,7 @@ namespace fastlook::viewer
             return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
         }
 
-        // Test hook: FASTLOOK_UPDATE_API names either a JSON file or a URL replacing the GitHub API address.
+        // Test hook: FASTLOOK_UPDATE_API names a local JSON file that replaces the GitHub API answer.
         std::wstring ApiOverride()
         {
             DWORD const len = GetEnvironmentVariableW(L"FASTLOOK_UPDATE_API", nullptr, 0);
@@ -302,7 +301,13 @@ namespace fastlook::viewer
                 co_await Ask(root, title, Str(kMap, L"InstallFailed"), {}, Str(kMap, L"Close"));
                 co_return;
             }
-            // The installer closes FastLook (`FastLook.exe --shutdown`) itself; this process just gets out of its way.
+            // Let the "Installing" dialog render before getting out of the installer's way (it closes FastLook itself
+            // through `FastLook.exe --shutdown`).
+            co_await resume_after(std::chrono::milliseconds(250));
+            if (!co_await ResumeOn(ui))
+            {
+                co_return;
+            }
             Application::Current().Exit();
         }
 

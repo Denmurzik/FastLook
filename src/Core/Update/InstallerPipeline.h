@@ -32,6 +32,7 @@ namespace fastlook::core
     DownloadOutcome DownloadAndVerifyInstaller(ReleaseInfo const& release, std::filesystem::path const& dir, FetchFile const& fetch,
                                                ProgressFn const& progress, std::stop_token stop);
 
-    // Starts `setup` with kInstallerArgs through the shell (so UAC applies). False when it could not be started.
-    bool LaunchInstaller(std::filesystem::path const& setup);
+    // Starts `setup` with kInstallerArgs through the shell (so UAC applies). `show` is the SW_* window state (tests pass
+    // SW_HIDE). False when it could not be started.
+    bool LaunchInstaller(std::filesystem::path const& setup, int show = 1 /* SW_SHOWNORMAL */);
 }

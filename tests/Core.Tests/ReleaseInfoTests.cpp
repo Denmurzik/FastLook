@@ -49,6 +49,18 @@ TEST(ReleaseInfo, RejectsAssetsOutsideOwnRepositoryOrTag)
     EXPECT_FALSE(ParseLatestRelease(kOtherTag));
 }
 
+TEST(ReleaseInfo, OwnerAndRepoMatchIgnoringCase)
+{
+    constexpr char kMixed[] = R"({"tag_name":"v1.0.0","assets":[
+        {"name":"FastLook-Setup-1.0.0.exe","browser_download_url":"https://github.com/denmurzik/fastlook/releases/download/v1.0.0/FastLook-Setup-1.0.0.exe"},
+        {"name":"FastLook-Setup-1.0.0.exe.sha256","browser_download_url":"https://github.com/DENMURZIK/FastLook/releases/download/v1.0.0/FastLook-Setup-1.0.0.exe.sha256"}]})";
+    EXPECT_TRUE(ParseLatestRelease(kMixed));
+    constexpr char kPathCase[] = R"({"tag_name":"v1.0.0","assets":[
+        {"name":"FastLook-Setup-1.0.0.exe","browser_download_url":"https://github.com/Denmurzik/FastLook/Releases/download/v1.0.0/FastLook-Setup-1.0.0.exe"},
+        {"name":"FastLook-Setup-1.0.0.exe.sha256","browser_download_url":"https://github.com/Denmurzik/FastLook/releases/download/V1.0.0/FastLook-Setup-1.0.0.exe.sha256"}]})";
+    EXPECT_FALSE(ParseLatestRelease(kPathCase));
+}
+
 TEST(ReleaseInfo, RejectsAssetsFromForeignHostOrWrongVersion)
 {
     constexpr char kForeign[] = R"({"tag_name":"v1.0.0","assets":[

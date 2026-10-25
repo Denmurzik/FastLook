@@ -1,3 +1,5 @@
+#include <Windows.h>
+
 #include "TestUtil.h"
 
 #include <chrono>
@@ -75,15 +77,15 @@ TEST(InstallerPipeline, VerifiedInstallerIsLaunchedWithSilentArguments)
     ASSERT_EQ(outcome, DownloadOutcome::Verified);
     ASSERT_TRUE(std::filesystem::exists(s.work / L"setup.cmd"));
 
-    ASSERT_TRUE(LaunchInstaller(s.work / L"setup.cmd"));
+    ASSERT_TRUE(LaunchInstaller(s.work / L"setup.cmd", SW_HIDE));
     auto const marker = s.work / L"ran.txt";
-    for (int i = 0; i < 100 && !std::filesystem::exists(marker); ++i)
+    std::string text;
+    for (int i = 0; i < 100 && text.empty(); ++i)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        text = ReadFile(marker); // "" while the marker is missing or still being written
     }
-    ASSERT_TRUE(std::filesystem::exists(marker));
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    auto const text = ReadFile(marker);
+    ASSERT_FALSE(text.empty()) << "dummy installer did not write its marker within 10 s";
     EXPECT_NE(text.find("/SILENT /SUPPRESSMSGBOXES /NORESTART"), std::string::npos) << text;
 }
 

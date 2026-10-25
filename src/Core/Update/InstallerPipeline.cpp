@@ -65,7 +65,7 @@ namespace fastlook::core
         return DownloadOutcome::Verified;
     }
 
-    bool LaunchInstaller(std::filesystem::path const& setup)
+    bool LaunchInstaller(std::filesystem::path const& setup, int show)
     {
         SHELLEXECUTEINFOW info{};
         info.cbSize = sizeof(info);
@@ -75,7 +75,7 @@ namespace fastlook::core
         info.lpFile = file.c_str();
         info.lpParameters = kInstallerArgs;
         info.lpDirectory = dir.c_str();
-        info.nShow = SW_SHOWNORMAL;
+        info.nShow = show;
         return ShellExecuteExW(&info) != FALSE;
     }
 }
