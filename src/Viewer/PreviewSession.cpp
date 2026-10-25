@@ -12,6 +12,7 @@
 #include "FileTypes/ClassifyFile.h"
 #include "FileTypes/Extensions.h"
 #include "FileTypes/FileName.h"
+#include "Nav/NavList.h"
 #include "PreviewWindow.xaml.h"
 #include "Previewers/Placeholder.h"
 #include "Previewers/PreviewerRegistry.h"
@@ -106,6 +107,33 @@ namespace fastlook::viewer
             return result;
         }
 
+        // Background thread: the name Explorer shows for a shell-namespace item; the parsing name when it cannot be resolved.
+        std::wstring ShellDisplayName(std::wstring const& path)
+        {
+            try
+            {
+                ComScope com;
+                winrt::com_ptr<IShellItem> item;
+                if (SUCCEEDED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(item.put()))))
+                {
+                    wchar_t* name = nullptr;
+                    if (SUCCEEDED(item->GetDisplayName(SIGDN_NORMALDISPLAY, &name)) && name != nullptr)
+                    {
+                        std::wstring result{name};
+                        CoTaskMemFree(name);
+                        if (!result.empty())
+                        {
+                            return result;
+                        }
+                    }
+                }
+            }
+            catch (...)
+            {
+            }
+            return std::wstring{core::BaseName(path)};
+        }
+
         FallbackInfo DescribeFailure(winrt::hresult_error const& e)
         {
             if (auto error = TryDecodePreviewError(e))
@@ -191,6 +219,7 @@ namespace fastlook::viewer
         m_navMode = payload.navMode;
         m_listComplete = payload.listComplete;
         m_explorer = reinterpret_cast<HWND>(static_cast<uintptr_t>(payload.explorerHwnd));
+        m_isDesktop = payload.isDesktop;
         m_monitorHint = payload.monitor;
         m_iconRect = payload.iconRect;
         ++m_hideSerial; // a hide still animating out is abandoned
@@ -215,36 +244,29 @@ namespace fastlook::viewer
 
     void PreviewSession::UpdateItems(core::ipc::ItemsPayload const& payload)
     {
-        if (payload.items.empty())
+        if (!m_visible || m_items.empty() || payload.items.empty())
         {
             return;
         }
-        size_t index = std::min<size_t>(payload.index, payload.items.size() - 1);
-        if (!m_items.empty())
+        // The user may already have navigated: the list is taken over only when it still contains what is displayed.
+        auto const located = core::nav::LocateItem(payload.items, m_items[m_index]);
+        if (!located)
         {
-            // The user may already have navigated: keep pointing at what is displayed when it is in the new list.
-            auto const& shown = m_items[m_index].path;
-            auto const found = std::ranges::find_if(payload.items, [&](core::ipc::Item const& item) { return SamePath(item.path, shown); });
-            if (found != payload.items.end())
-            {
-                index = static_cast<size_t>(found - payload.items.begin());
-            }
+            return;
         }
         m_items = payload.items;
-        m_index = index;
+        m_index = *located;
         m_navMode = payload.navMode;
         m_listComplete = true;
-        if (m_visible)
-        {
-            ViewerHost::Get().Window()->SetCounter(m_index, m_items.size());
-        }
+        ViewerHost::Get().Window()->SetCounter(m_index, m_items.size());
+        SchedulePrefetch();
     }
 
     void PreviewSession::Navigate(int delta)
     {
-        if (!m_visible || m_items.empty())
+        if (!m_visible || m_items.empty() || (!m_listComplete && m_items.size() <= 1))
         {
-            return;
+            return; // the list is still being collected and the current item is all there is
         }
         auto const next = static_cast<int64_t>(m_index) + delta;
         if (next < 0 || next >= static_cast<int64_t>(m_items.size()))
@@ -253,6 +275,11 @@ namespace fastlook::viewer
         }
         core::perf::Mark("nav_request");
         m_index = static_cast<size_t>(next);
+        m_lastDelta = delta < 0 ? -1 : +1;
+        if (m_navMode == core::ipc::NavMode::Folder && m_explorer != nullptr)
+        {
+            m_selectionSync.Sync(m_explorer, m_isDesktop, m_items[m_index]); // returns at once; never in Selection mode
+        }
         StartRequest(true);
     }
 
@@ -312,7 +339,11 @@ namespace fastlook::viewer
         req->item.ref = req->ref;
         m_current = req;
 
-        window->SetItem(req->ref.path, winrt::hstring{core::BaseName(req->ref.path)}, m_index, m_items.size());
+        window->SetItem(req->ref.path, req->ref.isVirtual ? winrt::hstring{} : winrt::hstring{core::BaseName(req->ref.path)}, m_index, m_items.size());
+        if (req->ref.isVirtual)
+        {
+            ResolveTitleAsync(req->ref);
+        }
 
         if (!m_visible)
         {
@@ -344,6 +375,10 @@ namespace fastlook::viewer
         // A fire_and_forget coroutine terminates the process on an escaping exception: nothing may leave this try block.
         try
         {
+            if (TryAttachPreloaded(req))
+            {
+                co_return;
+            }
             co_await winrt::resume_background();
             Classified classified;
             if (!req->cancelled)
@@ -470,6 +505,83 @@ namespace fastlook::viewer
         {
             FL_LOG_INFO(L"Preview request failed with an exception");
             ShowFailure(req);
+        }
+    }
+
+    bool PreviewSession::TryAttachPreloaded(std::shared_ptr<Request> const& req)
+    {
+        PreviewItem item;
+        auto previewer = m_preloader.Take(req->ref, &item);
+        if (!previewer)
+        {
+            return false;
+        }
+        try
+        {
+            req->item = item;
+            m_shownItem = item;
+            auto run = std::make_shared<PrepareRun>();
+            run->previewer = previewer;
+            run->completed = true; // PrepareAsync finished in the preloader
+            Attach(req, run, previewer->View(), KindName(item.kind));
+            return true;
+        }
+        catch (...)
+        {
+            FL_LOG_INFO(L"Attaching a preloaded previewer failed");
+            try
+            {
+                previewer->Unload();
+            }
+            catch (...)
+            {
+            }
+            return false;
+        }
+    }
+
+    void PreviewSession::SchedulePrefetch()
+    {
+        if (!m_visible || !m_attached || m_current || m_items.empty())
+        {
+            return;
+        }
+        std::vector<core::ipc::Item> neighbours;
+        for (int const delta : {m_lastDelta, -m_lastDelta})
+        {
+            auto const index = static_cast<int64_t>(m_index) + delta;
+            if (index >= 0 && index < static_cast<int64_t>(m_items.size()))
+            {
+                neighbours.push_back(m_items[static_cast<size_t>(index)]);
+            }
+        }
+        auto ctx = MakeContextSafe(ResolveMonitor(true), std::nullopt);
+        if (ctx)
+        {
+            m_preloader.Prefetch(std::move(neighbours), std::move(ctx));
+        }
+    }
+
+    winrt::fire_and_forget PreviewSession::ResolveTitleAsync(core::ipc::Item ref)
+    {
+        auto self = shared_from_this();
+        auto const ui = m_ui;
+        try
+        {
+            co_await winrt::resume_background();
+            std::wstring name = ShellDisplayName(ref.path);
+            if (!co_await ResumeOn(ui))
+            {
+                co_return;
+            }
+            if (m_visible && !m_items.empty() && SamePath(m_items[m_index].path, ref.path))
+            {
+                ViewerHost::Get().Window()->SetItem(ref.path, winrt::hstring{name}, m_index, m_items.size());
+            }
+        }
+        catch (...)
+        {
+            FL_LOG_INFO(L"Resolving the display name failed");
         }
     }
 
@@ -698,6 +810,10 @@ namespace fastlook::viewer
         {
             host.PinCurrent();
         }
+        else
+        {
+            SchedulePrefetch();
+        }
     }
 
     PreviewSession::Monitor PreviewSession::ResolveMonitor(bool preferWindow) const
@@ -805,6 +921,7 @@ namespace fastlook::viewer
         m_visible = false;
         m_pinPending = false;
         CancelCurrent();
+        m_preloader.Clear();
         HideAsync(++m_hideSerial);
     }
 
@@ -817,6 +934,7 @@ namespace fastlook::viewer
         PinnedView view{m_attached->previewer, m_shownItem};
         m_attached.reset();
         m_visible = false;
+        m_preloader.Clear();
         ++m_hideSerial;
         if (m_renderToken)
         {

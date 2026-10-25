@@ -44,6 +44,9 @@ namespace fastlook::viewer
         bool dark = false;
         core::Settings settings;
         std::optional<FallbackInfo> fallback;
+        // A neighbour being prepared in advance (Preloader): do not start playback or animation, keep the work minimal (text:
+        // index only the first chunk); the real start happens in View().
+        bool prefetch = false;
         std::function<void()> requestResize; // thread-safe: asks the session to refit the window to PreferredSize()
     };
 }

@@ -51,10 +51,51 @@ namespace fastlook::viewer
         }
 
         auto state = std::make_shared<IndexState>();
-        std::weak_ptr<IPreviewer> const weak = self;
         m_doc = doc;
         m_index = state;
         m_styler = MakeLexillaStyler(doc, core::LexerNameFor(std::filesystem::path{path}.filename().wstring()));
+        if (ctx->prefetch)
+        {
+            // A preloaded neighbour indexes only its first chunk (64 KiB, enough for the first screen); View() resumes the rest.
+            std::stop_source firstChunkOnly;
+            doc->BuildIndex(firstChunkOnly.get_token(), [&](uint64_t lines, bool complete) {
+                state->lines = lines;
+                state->complete = complete;
+                firstChunkOnly.request_stop();
+            });
+        }
+        else
+        {
+            StartIndexing(self);
+            // The first chunk (64 KiB, enough for the first screen) is indexed in microseconds.
+            std::unique_lock lock{state->mutex};
+            while (!state->firstReported && !cancel())
+            {
+                state->changed.wait_for(lock, 20ms);
+            }
+        }
+        if (cancel())
+        {
+            co_return;
+        }
+        if (doc->Faulted())
+        {
+            throw PreviewError{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
+        }
+
+        if (!co_await ResumeOn(ui))
+        {
+            co_return;
+        }
+    }
+
+    // Builds (or resumes) the line index on a background thread; UI progress is drained through DrainProgress().
+    void TextPreviewer::StartIndexing(std::shared_ptr<TextPreviewer> const& self)
+    {
+        auto const doc = m_doc;
+        auto const state = m_index;
+        auto const ui = m_ctx->ui;
+        std::weak_ptr<IPreviewer> const weak = self;
         m_indexThread = std::jthread([doc, state, weak, ui](std::stop_token stop) {
             try
             {
@@ -91,32 +132,14 @@ namespace fastlook::viewer
             }
             state->changed.notify_all();
         });
-
-        // The first chunk (64 KiB, enough for the first screen) is indexed in microseconds.
-        {
-            std::unique_lock lock{state->mutex};
-            while (!state->firstReported && !cancel())
-            {
-                state->changed.wait_for(lock, 20ms);
-            }
-        }
-        if (cancel())
-        {
-            co_return;
-        }
-        if (doc->Faulted())
-        {
-            throw PreviewError{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
-        }
-
-        if (!co_await ResumeOn(ui))
-        {
-            co_return;
-        }
     }
 
     winrt::Microsoft::UI::Xaml::UIElement TextPreviewer::View()
     {
+        if (m_ctx->prefetch && !m_indexThread.joinable() && m_doc && !m_doc->IndexComplete())
+        {
+            StartIndexing(std::static_pointer_cast<TextPreviewer>(shared_from_this()));
+        }
         m_view = std::make_unique<CodeView>(m_doc);
         m_view->SetStyler(m_styler);
         m_view->SetDark(m_ctx->dark);

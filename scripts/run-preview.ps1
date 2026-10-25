@@ -3,7 +3,7 @@
 .SYNOPSIS
   UI verification: launches a FastLook exe, screenshots its window, samples memory, prints a RESULT line, always kills it.
 .DESCRIPTION
-  Launches `<Exe> --preview <File> --perf-log <tmp> <ExtraArgs>` (without --preview when -File is omitted) with
+  Launches `<Exe> --preview <File> [<Files>...] --perf-log <tmp> <ExtraArgs>` (without --preview when neither is given) with
   FASTLOOK_DATA_DIR pointing at a fresh temp directory (unless -KeepEnv), waits for a top-level window, waits -WaitMs,
   saves a PNG, samples Private Working Set and prints:
     RESULT alive=<bool> window=<bool> responding=<bool> privateWS_MB=<n> png=<path>
@@ -15,6 +15,7 @@
 [CmdletBinding()]
 param(
     [string]$File,
+    [string[]]$Files = @(),
     [string[]]$ExtraArgs = @(),
     [string]$Out,
     [int]$WaitMs = 1500,
@@ -40,10 +41,12 @@ New-Item -ItemType Directory -Force $tmp | Out-Null
 $perfLog = Join-Path $tmp 'perf.log'
 
 $argList = @()
-if ($File) {
+# -Files previews several items at once (navigation); -File is the single-item form.
+$previewItems = @(@($File) + $Files | Where-Object { $_ })
+if ($previewItems.Count -gt 0) {
     # Shell namespace paths (::{CLSID}, shell:...) are not file system paths.
-    $previewPath = if ($File -match '^(::|shell:)') { $File } else { (Resolve-Path $File).Path }
-    $argList += @('--preview', $previewPath)
+    $resolved = $previewItems | ForEach-Object { if ($_ -match '^(::|shell:)') { $_ } else { (Resolve-Path $_).Path } }
+    $argList += @('--preview') + @($resolved)
 }
 $argList += @('--perf-log', $perfLog)
 $argList += $ExtraArgs

@@ -13,6 +13,8 @@
 
 #include "Geometry.h"
 #include "Ipc/Protocol.h"
+#include "Navigation/Preloader.h"
+#include "Navigation/SelectionSync.h"
 #include "Previewers/IPreviewer.h"
 
 namespace fastlook::viewer
@@ -87,6 +89,12 @@ namespace fastlook::viewer
         struct WaitForPrepare;
 
         void StartRequest(bool fromNavigation);
+        // Attaches the neighbour the preloader has prepared for req (View() starts its playback). False: nothing usable, take the normal path.
+        bool TryAttachPreloaded(std::shared_ptr<Request> const& req);
+        // Prefetches index +-1 (the direction of the last navigation first); only while the content of the current item is shown.
+        void SchedulePrefetch();
+        // Virtual items (e.g. This PC) show the shell display name instead of the ::{CLSID} path.
+        winrt::fire_and_forget ResolveTitleAsync(core::ipc::Item ref);
         winrt::fire_and_forget RunRequestAsync(std::shared_ptr<Request> req);
         winrt::fire_and_forget HideAsync(uint64_t serial);
 
@@ -114,6 +122,8 @@ namespace fastlook::viewer
         core::ipc::NavMode m_navMode = core::ipc::NavMode::Selection;
         bool m_listComplete = true;
         HWND m_explorer = nullptr;
+        bool m_isDesktop = false;
+        int m_lastDelta = +1;
         uint64_t m_monitorHint = 0;
         std::optional<core::RectI> m_iconRect;
 
@@ -126,5 +136,7 @@ namespace fastlook::viewer
         std::shared_ptr<PrepareRun> m_attached; // previewer whose view is in the window
         std::vector<std::shared_ptr<PrepareRun>> m_retiring;
         winrt::event_token m_renderToken{};
+        Preloader m_preloader;
+        SelectionSync m_selectionSync;
     };
 }

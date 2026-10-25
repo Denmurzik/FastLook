@@ -40,6 +40,7 @@ namespace fastlook::viewer
             std::atomic<bool> uiPending{false};
         };
 
+        void StartIndexing(std::shared_ptr<TextPreviewer> const& self);
         void StopIndexing();
         void DrainProgress(); // UI thread
         void ToggleWrap();
