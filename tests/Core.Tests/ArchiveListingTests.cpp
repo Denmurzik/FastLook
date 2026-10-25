@@ -219,6 +219,13 @@ TEST(ArchiveListing, EmptyFile)
 {
     auto const l = ListArchive(WriteTemp(L"empty.zip", ""), {}, {});
     EXPECT_TRUE(l.entries.empty());
+    EXPECT_EQ(l.fileCount, 0u);
+    EXPECT_EQ(l.dirCount, 0u);
+    EXPECT_EQ(l.totalSize, 0u);
+    EXPECT_FALSE(l.truncated);
+    EXPECT_FALSE(l.headerTooLarge);
+    EXPECT_FALSE(l.encryptedHeaders);
+    EXPECT_TRUE(l.error.empty()); // an empty file is an empty listing, not a failure
 }
 
 TEST(ArchiveListing, EncryptedZip)
@@ -251,6 +258,11 @@ TEST(ArchiveListing, HostileNamesAreCutAndTraversalIsOnlyListed)
     auto const l = ListArchive(WriteTemp(L"hostile.zip", BuildZip({huge, "../../evil.txt", "C:\\Windows\\x.dll", "./", "ok/file.txt"})), {}, {});
     ASSERT_GE(l.entries.size(), 4u);
     EXPECT_EQ(l.entries[0].path.size(), 1024u);
+    // The kept name holds no more memory than the budget counts for it.
+    for (auto const& e : l.entries)
+    {
+        EXPECT_LE(e.path.capacity(), e.path.size() + 16) << e.path.size();
+    }
     EXPECT_EQ(l.entries[1].path, L"../../evil.txt");
     EXPECT_EQ(l.entries[2].path, L"C:/Windows/x.dll");
     EXPECT_EQ(l.entries[3].path, L"ok/file.txt"); // "./" has no name and is dropped
@@ -339,4 +351,139 @@ TEST(ArchiveListing, ZipWithManyEntriesIsReadAsAStream)
     EXPECT_EQ(l.fileCount, 70000u);
     ASSERT_GT(l.entries.size(), 2u);
     EXPECT_TRUE(l.entries[0].compressedSize.has_value());
+}
+
+namespace
+{
+    // 7-Zip variable-length number.
+    void Put7z(std::string& out, uint64_t v)
+    {
+        for (int extra = 0; extra < 8; ++extra)
+        {
+            if (v < (1ull << (7 * (extra + 1))))
+            {
+                uint8_t const mask = static_cast<uint8_t>(0xFF << (8 - extra));
+                out.push_back(static_cast<char>(mask | static_cast<uint8_t>(v >> (8 * extra))));
+                for (int i = 0; i < extra; ++i)
+                {
+                    out.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
+                }
+                return;
+            }
+        }
+        out.push_back(static_cast<char>(0xFF));
+        for (int i = 0; i < 8; ++i)
+        {
+            out.push_back(static_cast<char>((v >> (8 * i)) & 0xFF));
+        }
+    }
+
+    // A 7z file made of a signature header plus `header` placed right after it (offset 0). Checksums are not valid.
+    std::string BuildSevenZip(std::string const& header, uint64_t declaredHeaderSize)
+    {
+        std::string out("7z\xBC\xAF\x27\x1C", 6);
+        out.push_back(0);
+        out.push_back(4);
+        Put32(out, 0);
+        Put32(out, 0);
+        Put32(out, 0); // next header offset (u64)
+        Put32(out, static_cast<uint32_t>(declaredHeaderSize));
+        Put32(out, static_cast<uint32_t>(declaredHeaderSize >> 32));
+        Put32(out, 0);
+        return out + header;
+    }
+
+    // An encoded header: one LZMA folder whose decoded size is `unpackedSize`.
+    std::string EncodedHeader(uint64_t unpackedSize)
+    {
+        std::string h;
+        h.push_back(0x17);
+        h.push_back(0x06); // PackInfo
+        Put7z(h, 0);
+        Put7z(h, 1);
+        h.push_back(0x09);
+        Put7z(h, 10);
+        h.push_back(0x00);
+        h.push_back(0x07); // UnPackInfo
+        h.push_back(0x0B); // Folder
+        Put7z(h, 1);
+        h.push_back(0);
+        Put7z(h, 1); // one coder
+        h.push_back(0x23); // id size 3, has properties
+        h += std::string("\x03\x01\x01", 3);
+        Put7z(h, 5);
+        h += std::string(5, '\x5D');
+        h.push_back(0x0C);
+        Put7z(h, unpackedSize);
+        h.push_back(0x00);
+        h.push_back(0x00);
+        return h;
+    }
+}
+
+TEST(ArchiveListing, SevenZipHeaderBiggerThanTheLimitIsRefusedUnread)
+{
+    // The signature header declares a 1 GB next header; the file is 32 bytes. Refused before libarchive sees it.
+    auto const l = ListArchive(WriteTemp(L"huge-header.7z", BuildSevenZip("", 1ull << 30)), {}, {});
+    EXPECT_TRUE(l.headerTooLarge);
+    EXPECT_FALSE(l.error.empty());
+    EXPECT_TRUE(l.entries.empty());
+}
+
+TEST(ArchiveListing, SevenZipEncodedHeaderThatInflatesPastTheLimitIsRefused)
+{
+    // A few bytes on disk that declare a 4 GB decoded header (the "LZMA of zeros" shape).
+    auto const header = EncodedHeader(4ull << 30);
+    auto const l = ListArchive(WriteTemp(L"bomb-header.7z", BuildSevenZip(header, header.size())), {}, {});
+    EXPECT_TRUE(l.headerTooLarge);
+}
+
+TEST(ArchiveListing, SevenZipEncodedHeaderWithinTheLimitIsNotRefusedByTheCheck)
+{
+    auto const header = EncodedHeader(100000);
+    auto const l = ListArchive(WriteTemp(L"small-header.7z", BuildSevenZip(header, header.size())), {}, {});
+    EXPECT_FALSE(l.headerTooLarge); // libarchive then fails on the missing packed stream, which is a plain error
+}
+
+TEST(ArchiveListing, SevenZipEncodedHeaderThatCannotBeParsedIsRefused)
+{
+    std::string header = EncodedHeader(100);
+    header.resize(header.size() - 6); // cut inside the folder description
+    auto const l = ListArchive(WriteTemp(L"cut-header.7z", BuildSevenZip(header, header.size())), {}, {});
+    EXPECT_TRUE(l.headerTooLarge);
+}
+
+TEST(ArchiveListing, RealSevenZipIsNotRefused)
+{
+    EXPECT_FALSE(ListArchive(FixturePath("archive/sample.7z"), {}, {}).headerTooLarge);
+}
+
+TEST(ArchiveListing, ZipEndRecordThatUnderstatesTheDirectoryStillListsAndIsBounded)
+{
+    // The end record says 1 entry, the directory holds 200 000 records (about 10 MB): it must be read as a stream.
+    std::vector<std::string> names;
+    for (int i = 0; i < 200000; ++i)
+    {
+        names.push_back("f" + std::to_string(i));
+    }
+    auto zip = BuildZip(names);
+    auto const eocd = zip.rfind(std::string("PK\x05\x06", 4));
+    ASSERT_NE(eocd, std::string::npos);
+    zip[eocd + 8] = 1;
+    zip[eocd + 9] = 0;
+    zip[eocd + 10] = 1;
+    zip[eocd + 11] = 0;
+    auto const l = ListArchive(WriteTemp(L"lying.zip", zip), {}, {});
+    EXPECT_EQ(l.entries.size(), 100000u);
+    EXPECT_TRUE(l.truncated);
+}
+
+TEST(ArchiveListing, TimeLimitWithoutAnyEntryIsTruncatedAndEmpty)
+{
+    ArchiveLimits limits;
+    limits.maxTime = milliseconds(0);
+    auto const l = ListArchive(FixturePath("archive/sample.tar.gz"), limits, {});
+    EXPECT_TRUE(l.entries.empty());
+    EXPECT_TRUE(l.truncated);
+    EXPECT_TRUE(l.error.empty());
 }

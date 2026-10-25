@@ -34,6 +34,7 @@ namespace fastlook::core
         uint64_t fileCount = 0, dirCount = 0, totalSize = 0; // dirCount: explicit folders plus implied parents
         bool truncated = false;                              // the entry limit, the time limit, stop or a damaged tail cut the list
         bool encryptedHeaders = false;
+        bool headerTooLarge = false; // a 7z header that would take more than 16 MB to hold: refused before it is read
         std::wstring format;
         std::wstring error; // diagnostic text (English); empty when the archive could be read
     };

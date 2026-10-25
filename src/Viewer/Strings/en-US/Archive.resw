@@ -61,7 +61,7 @@
     <value>{0} folders</value>
   </data>
   <data name="TruncatedOne" xml:space="preserve">
-    <value>Showing the first entry</value>
+    <value>Showing first {0} entry</value>
   </data>
   <data name="TruncatedFew" xml:space="preserve">
     <value>Showing first {0} entries</value>
@@ -77,5 +77,11 @@
   </data>
   <data name="OpenFailed" xml:space="preserve">
     <value>The archive could not be opened</value>
+  </data>
+  <data name="HeaderTooLarge" xml:space="preserve">
+    <value>The archive header is too large to preview</value>
+  </data>
+  <data name="TooSlow" xml:space="preserve">
+    <value>Reading the archive took too long</value>
   </data>
 </root>

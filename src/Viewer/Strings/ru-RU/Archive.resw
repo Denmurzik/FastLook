@@ -61,7 +61,7 @@
     <value>{0} папки</value>
   </data>
   <data name="TruncatedOne" xml:space="preserve">
-    <value>Показана первая запись</value>
+    <value>Показаны первые {0} запись</value>
   </data>
   <data name="TruncatedFew" xml:space="preserve">
     <value>Показаны первые {0} записи</value>
@@ -77,5 +77,11 @@
   </data>
   <data name="OpenFailed" xml:space="preserve">
     <value>Не удалось открыть архив</value>
+  </data>
+  <data name="HeaderTooLarge" xml:space="preserve">
+    <value>Заголовок архива слишком велик для просмотра</value>
+  </data>
+  <data name="TooSlow" xml:space="preserve">
+    <value>Чтение архива заняло слишком много времени</value>
   </data>
 </root>

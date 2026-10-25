@@ -73,6 +73,12 @@ namespace fastlook::viewer
         {
             UIElement GetElement(ElementFactoryGetArgs const&)
             {
+                if (!m_pool.empty())
+                {
+                    UIElement reused = std::move(m_pool.back());
+                    m_pool.pop_back();
+                    return reused;
+                }
                 Grid row;
                 row.Height(kRowHeightDip);
                 SetColumns(row);
@@ -91,7 +97,18 @@ namespace fastlook::viewer
                 return row;
             }
 
-            void RecycleElement(ElementFactoryRecycleArgs const&) {}
+            // Rows leaving the viewport are kept (a few) and refilled by the prepare event: a fast scroll builds no new elements.
+            void RecycleElement(ElementFactoryRecycleArgs const& args)
+            {
+                if (m_pool.size() < kRowPoolSize)
+                {
+                    m_pool.push_back(args.Element());
+                }
+            }
+
+        private:
+            static constexpr size_t kRowPoolSize = 64;
+            std::vector<UIElement> m_pool;
         };
 
         // Singular / few / many / other by the UI language (the Archive.resw PluralRule).
@@ -184,6 +201,15 @@ namespace fastlook::viewer
         if (!co_await ResumeOn(ui) || cancel())
         {
             co_return;
+        }
+        if (listing.headerTooLarge)
+        {
+            throw PreviewError{std::wstring{Str(L"Archive", L"HeaderTooLarge")}, std::nullopt};
+        }
+        if (listing.entries.empty() && listing.truncated)
+        {
+            // The time limit ran out before the first entry: "first 0 entries" would say nothing.
+            throw PreviewError{std::wstring{Str(L"Archive", L"TooSlow")}, std::nullopt};
         }
         if (listing.entries.empty() && !listing.encryptedHeaders && !listing.error.empty())
         {

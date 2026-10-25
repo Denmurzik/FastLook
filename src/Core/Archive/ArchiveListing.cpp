@@ -13,6 +13,7 @@
 #include <cwctype>
 #include <string_view>
 #include <optional>
+#include <span>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -28,10 +29,12 @@ namespace fastlook::core
         constexpr size_t kMaxPathChars = 1024;
         constexpr size_t kMaxTotalPathChars = 16u * 1024 * 1024; // 32 MB of names, whatever the entry count
         constexpr size_t kMaxFolderHashes = 500000;              // bookkeeping for the folder count (8 bytes each)
-        constexpr size_t kReadBlock = 64 * 1024;
+        constexpr size_t kReadBlock = 16 * 1024; // the limits are checked once per block: small enough for fast-expanding xz / zstd
         constexpr int kMaxRetries = 3;
         // libarchive's seekable ZIP reader loads the whole central directory; a bigger one is read as a stream instead.
         constexpr uint32_t kMaxSeekableZipEntries = 60000;
+        constexpr uint64_t kMaxSeekableZipDirectoryBytes = 8u * 1024 * 1024; // measured on the file, not taken from the end record
+        constexpr uint64_t kMaxSevenZipHeaderBytes = 16u * 1024 * 1024;     // encoded and decoded
         constexpr DWORD kEocdSearchBytes = 22 + 65535;
 
         // The reading side: a file handle behind libarchive's callbacks. Every callback checks the deadline and the stop token,
@@ -149,10 +152,243 @@ namespace fastlook::core
                 if (tail[i] == 'P' && tail[i + 1] == 'K' && tail[i + 2] == 5 && tail[i + 3] == 6)
                 {
                     uint32_t const total = tail[i + 10] | (static_cast<uint32_t>(tail[i + 11]) << 8);
-                    return total > kMaxSeekableZipEntries;
+                    uint32_t const directoryOffset = tail[i + 16] | (static_cast<uint32_t>(tail[i + 17]) << 8) |
+                                                     (static_cast<uint32_t>(tail[i + 18]) << 16) | (static_cast<uint32_t>(tail[i + 19]) << 24);
+                    uint64_t const endRecord = static_cast<uint64_t>(from.QuadPart) + i;
+                    // libarchive walks the directory records it finds, not the count the end record declares: bound the span itself.
+                    return total > kMaxSeekableZipEntries || directoryOffset > endRecord ||
+                           endRecord - directoryOffset > kMaxSeekableZipDirectoryBytes;
                 }
             }
             return false;
+        }
+
+        // 7-Zip numbers: the leading 1 bits of the first byte count the extra bytes.
+        struct SevenZipReader
+        {
+            std::span<uint8_t const> data;
+            size_t at = 0;
+            bool failed = false;
+
+            uint8_t Byte()
+            {
+                if (at >= data.size())
+                {
+                    failed = true;
+                    return 0;
+                }
+                return data[at++];
+            }
+
+            uint64_t Number()
+            {
+                uint8_t const first = Byte();
+                uint8_t mask = 0x80;
+                uint64_t value = 0;
+                for (int i = 0; i < 8; ++i)
+                {
+                    if ((first & mask) == 0)
+                    {
+                        return value | (static_cast<uint64_t>(first & (mask - 1)) << (8 * i));
+                    }
+                    value |= static_cast<uint64_t>(Byte()) << (8 * i);
+                    mask >>= 1;
+                }
+                return value;
+            }
+
+            void Skip(uint64_t n)
+            {
+                if (n > data.size() - at)
+                {
+                    failed = true;
+                    at = data.size();
+                    return;
+                }
+                at += static_cast<size_t>(n);
+            }
+        };
+
+        // Largest decoded size declared by the StreamsInfo of an encoded 7z header; nullopt when it cannot be parsed.
+        std::optional<uint64_t> LargestEncodedHeaderSize(std::span<uint8_t const> bytes)
+        {
+            constexpr uint64_t kMaxFolders = 64;
+            constexpr uint64_t kMaxCoders = 32;
+            SevenZipReader r{bytes};
+            if (r.Byte() != 0x17)
+            {
+                return std::nullopt;
+            }
+            uint8_t id = r.Byte();
+            if (id == 0x06) // PackInfo
+            {
+                r.Number(); // pack position
+                uint64_t const packStreams = r.Number();
+                if (packStreams > kMaxFolders)
+                {
+                    return std::nullopt;
+                }
+                for (id = r.Byte(); id != 0x00 && !r.failed; id = r.Byte())
+                {
+                    if (id == 0x09) // sizes
+                    {
+                        for (uint64_t i = 0; i < packStreams; ++i)
+                        {
+                            r.Number();
+                        }
+                    }
+                    else if (id == 0x0A) // digests: only the "all defined" form
+                    {
+                        if (r.Byte() == 0)
+                        {
+                            return std::nullopt;
+                        }
+                        r.Skip(packStreams * 4);
+                    }
+                    else
+                    {
+                        return std::nullopt;
+                    }
+                }
+                id = r.Byte();
+            }
+            if (id != 0x07 || r.Byte() != 0x0B) // UnPackInfo, Folder
+            {
+                return std::nullopt;
+            }
+            uint64_t const folders = r.Number();
+            if (folders == 0 || folders > kMaxFolders || r.Byte() != 0) // external data is not supported
+            {
+                return std::nullopt;
+            }
+            uint64_t totalOut = 0;
+            for (uint64_t f = 0; f < folders && !r.failed; ++f)
+            {
+                uint64_t const coders = r.Number();
+                if (coders == 0 || coders > kMaxCoders)
+                {
+                    return std::nullopt;
+                }
+                uint64_t in = 0, out = 0;
+                for (uint64_t c = 0; c < coders && !r.failed; ++c)
+                {
+                    uint8_t const flags = r.Byte();
+                    r.Skip(flags & 0x0F);
+                    if (flags & 0x10)
+                    {
+                        in += r.Number();
+                        out += r.Number();
+                    }
+                    else
+                    {
+                        ++in;
+                        ++out;
+                    }
+                    if (flags & 0x20)
+                    {
+                        r.Skip(r.Number());
+                    }
+                    if (flags & 0x80)
+                    {
+                        return std::nullopt; // alternative methods: not produced by any known writer
+                    }
+                }
+                if (out == 0 || in < out - 1 || out > 1024)
+                {
+                    return std::nullopt;
+                }
+                uint64_t const bindPairs = out - 1;
+                for (uint64_t b = 0; b < bindPairs * 2; ++b)
+                {
+                    r.Number();
+                }
+                uint64_t const packed = in - bindPairs;
+                if (packed > 1)
+                {
+                    for (uint64_t k = 0; k < packed; ++k)
+                    {
+                        r.Number();
+                    }
+                }
+                totalOut += out;
+            }
+            if (r.Byte() != 0x0C) // CodersUnPackSize
+            {
+                return std::nullopt;
+            }
+            uint64_t largest = 0;
+            for (uint64_t i = 0; i < totalOut && !r.failed; ++i)
+            {
+                largest = std::max(largest, r.Number());
+            }
+            if (r.failed)
+            {
+                return std::nullopt;
+            }
+            return largest;
+        }
+
+        // A 7z reader holds the whole decoded header (names and properties of every file) in memory before the first entry is
+        // returned, and its size is whatever the file declares. True when the header is, or may be, bigger than the limit
+        // (a header that cannot be parsed counts as too large). The file position is back at 0 afterwards. Not a 7z file: false.
+        bool SevenZipHeaderTooLarge(HANDLE file)
+        {
+            auto readAt = [&](uint64_t offset, void* out, DWORD n) {
+                LARGE_INTEGER to;
+                to.QuadPart = static_cast<LONGLONG>(offset);
+                DWORD got = 0;
+                return SetFilePointerEx(file, to, nullptr, FILE_BEGIN) && ReadFile(file, out, n, &got, nullptr) && got == n;
+            };
+            struct Rewind
+            {
+                HANDLE h;
+                ~Rewind()
+                {
+                    LARGE_INTEGER zero{};
+                    SetFilePointerEx(h, zero, nullptr, FILE_BEGIN);
+                }
+            } rewind{file};
+
+            uint8_t start[32];
+            if (!readAt(0, start, sizeof start) || std::memcmp(start, "7z\xBC\xAF\x27\x1C", 6) != 0)
+            {
+                return false;
+            }
+            auto le64 = [&](int at) {
+                uint64_t v = 0;
+                for (int i = 7; i >= 0; --i)
+                {
+                    v = (v << 8) | start[at + i];
+                }
+                return v;
+            };
+            uint64_t const offset = le64(12);
+            uint64_t const headerSize = le64(20);
+            if (headerSize == 0)
+            {
+                return false;
+            }
+            if (headerSize > kMaxSevenZipHeaderBytes)
+            {
+                return true;
+            }
+            LARGE_INTEGER fileSize{};
+            if (!GetFileSizeEx(file, &fileSize) || offset > static_cast<uint64_t>(fileSize.QuadPart) ||
+                headerSize > static_cast<uint64_t>(fileSize.QuadPart) - std::min<uint64_t>(32 + offset, static_cast<uint64_t>(fileSize.QuadPart)))
+            {
+                return false; // points outside the file: libarchive fails on it without allocating
+            }
+            std::vector<uint8_t> head(static_cast<size_t>(std::min<uint64_t>(headerSize, 4096)));
+            if (!readAt(32 + offset, head.data(), static_cast<DWORD>(head.size())))
+            {
+                return false;
+            }
+            if (head[0] != 0x17)
+            {
+                return false; // a plain header: bounded by its declared size
+            }
+            auto const largest = LargestEncodedHeaderSize(head);
+            return !largest || *largest > kMaxSevenZipHeaderBytes;
         }
 
         // Empty when the name has no wide form: with hdrcharset set, libarchive drops names that are not valid in that charset.
@@ -160,7 +396,7 @@ namespace fastlook::core
         {
             if (wchar_t const* wide = archive_entry_pathname_w(entry); wide != nullptr)
             {
-                return std::wstring(wide, wcsnlen(wide, kMaxPathChars * 4));
+                return std::wstring(wide, wcsnlen(wide, kMaxPathChars + 16)); // a cut name never holds more than this
             }
             return std::nullopt;
         }
@@ -195,6 +431,7 @@ namespace fastlook::core
                     path.pop_back();
                 }
             }
+            path.shrink_to_fit(); // the kept names are what the memory budget counts
             return path;
         }
 
@@ -320,12 +557,24 @@ namespace fastlook::core
             {
                 archive_read_set_seek_callback(a, SeekCallback);
             }
+            if (!raw && SevenZipHeaderTooLarge(source.file))
+            {
+                listing.headerTooLarge = true;
+                listing.error = L"The archive header is too large";
+                return Outcome::Done;
+            }
             if (archive_read_open1(a) != ARCHIVE_OK)
             {
                 char const* message = archive_error_string(a);
                 listing.error = FromUtf8(message != nullptr ? message : "The archive could not be opened");
                 listing.encryptedHeaders = ContainsNoCase(message, "passphrase");
-                return source.aborted ? Outcome::Done : Outcome::Unrecognized;
+                if (source.aborted)
+                {
+                    listing.error.clear(); // cut by the time limit or stop, not damaged
+                    listing.truncated = true;
+                    return Outcome::Done;
+                }
+                return Outcome::Unrecognized;
             }
 
             Collector c;
