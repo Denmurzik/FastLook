@@ -114,6 +114,10 @@ namespace fastlook::viewer
                 {
                     ipc->Stop();
                 }
+                if (auto const ms = EnvNumber(L"FASTLOOK_TEST_EXIT_STALL_MS"))
+                {
+                    Sleep(static_cast<DWORD>(*ms)); // test hook: widen the window between pipe close and process exit
+                }
                 auto& host = ViewerHost::Get();
                 host.CloseAllWindows();
                 host.ExitApp();

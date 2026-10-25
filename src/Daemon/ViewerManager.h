@@ -53,6 +53,7 @@ namespace fastlook::daemon
         };
 
         bool Launch();
+        bool Start(bool retryOnForeignExit);
         void ResetConnection();
         void Kill(char const* reason);
         bool ProcessExited() const;

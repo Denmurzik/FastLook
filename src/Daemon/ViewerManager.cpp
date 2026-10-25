@@ -123,7 +123,7 @@ namespace fastlook::daemon
         if (m_process)
         {
             TerminateProcess(m_process, 1);
-            WaitForSingleObject(m_process, 500);
+            WaitForSingleObject(m_process, 2000); // the instance mutex is released only when the process is gone
         }
         ResetConnection();
     }
@@ -174,14 +174,28 @@ namespace fastlook::daemon
         {
             return true;
         }
-        if (m_process || m_conn)
+        bool const hadPrevious = m_process || m_conn;
+        if (hadPrevious)
         {
-            ResetConnection(); // exited, or disconnected while still exiting
+            // Disconnected while the process may still be in its exit sequence (it holds the instance mutex until it is gone).
+            if (m_process && !WaitProcessExit(2000ms))
+            {
+                Kill("disconnected");
+            }
+            else
+            {
+                ResetConnection();
+            }
         }
         if (Clock::now() < m_backoffUntil)
         {
             return false;
         }
+        return Start(hadPrevious);
+    }
+
+    bool ViewerManager::Start(bool retryOnForeignExit)
+    {
         if (!Launch())
         {
             m_backoffUntil = Clock::now() + kLaunchBackoff;
@@ -202,8 +216,13 @@ namespace fastlook::daemon
             DWORD code = 0;
             GetExitCodeProcess(m_process, &code);
             FL_LOG_INFO(L"viewer exited at start code={}", code);
-            m_backoffUntil = Clock::now() + (code == kExitOtherServer ? kForeignServerBackoff : kLaunchBackoff);
             ResetConnection();
+            if (code == kExitOtherServer && retryOnForeignExit)
+            {
+                // Most likely our own previous Viewer still released its mutex late: one immediate retry, no back-off.
+                return Start(false);
+            }
+            m_backoffUntil = Clock::now() + (code == kExitOtherServer ? kForeignServerBackoff : kLaunchBackoff);
             return false;
         }
         if (!conn)
@@ -304,6 +323,7 @@ namespace fastlook::daemon
             }
             if (!EnsureRunning())
             {
+                FL_LOG_INFO(L"deliver failed: Viewer unavailable");
                 return std::nullopt;
             }
             msg.id = NextId();

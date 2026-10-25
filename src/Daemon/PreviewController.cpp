@@ -130,10 +130,11 @@ namespace fastlook::daemon
         }
         else
         {
-            // A stuck pipe or shell call; the process is exiting anyway and the Job object takes the Viewer down.
+            // A stuck pipe or shell call: members cannot be destroyed under the running thread. The process ends here;
+            // the Job object takes the Viewer down.
             lock.unlock();
-            FL_LOG_INFO(L"controller thread did not stop in time");
-            m_thread.detach();
+            FL_LOG_INFO(L"controller thread did not stop in time, exiting");
+            ExitProcess(0);
         }
     }
 
@@ -245,7 +246,7 @@ namespace fastlook::daemon
         toggle.show.listComplete = plan->listComplete;
         auto ack = m_viewer->Deliver(std::move(toggle));
         LogAck(L"toggle_acked", ack);
-        if (!ack || !ack->shown || plan->listComplete || plan->index >= plan->items.size())
+        if (!ack || !ack->shown || plan->listComplete || plan->index >= plan->items.size() || !m_viewer->IsRunning())
         {
             return;
         }

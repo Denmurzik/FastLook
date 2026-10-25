@@ -97,7 +97,7 @@ function Start-Daemon([string[]]$DaemonArgs = @()) {
 function Stop-All { Get-Process -Name 'FastLook*' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue }
 
 $saved = @{}
-foreach ($n in 'FASTLOOK_DATA_DIR', 'FASTLOOK_POWERTOYS_DIR', 'FASTLOOK_IDLE_SECONDS') { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
+foreach ($n in 'FASTLOOK_DATA_DIR', 'FASTLOOK_POWERTOYS_DIR', 'FASTLOOK_IDLE_SECONDS', 'FASTLOOK_TEST_EXIT_STALL_MS') { $saved[$n] = [Environment]::GetEnvironmentVariable($n) }
 $env:FASTLOOK_DATA_DIR = $data
 $env:FASTLOOK_POWERTOYS_DIR = $emptyPt
 $env:FASTLOOK_IDLE_SECONDS = $null
@@ -186,6 +186,33 @@ try {
     Check "race: $RaceIterations x toggle_acked shown=1" ($shown1 -eq $RaceIterations) "(got $shown1)"
     Check "race: $RaceIterations x toggle_acked shown=0" ($shown0 -eq $RaceIterations) "(got $shown0)"
     Check 'race: no deliver failed' ((LogCount 'deliver failed') -eq 0)
+    $env:FASTLOOK_IDLE_SECONDS = $null
+
+    # ---------- Space while the Viewer is in its (stalled) exit sequence ----------
+    Check 'stalled exit: --shutdown exits 0' ((Invoke-Daemon @('--shutdown')) -eq 0)
+    $null = $daemon.WaitForExit(5000)
+    Stop-All
+    Remove-Item (Join-Path $data 'logs') -Recurse -Force -ErrorAction SilentlyContinue
+    $env:FASTLOOK_IDLE_SECONDS = '1'
+    $env:FASTLOOK_TEST_EXIT_STALL_MS = '1500'
+    $daemon = Start-Daemon
+    Start-Sleep -Seconds 2
+    $null = Invoke-Daemon @('--toggle', $a)
+    Start-Sleep -Milliseconds 300
+    $null = Invoke-Daemon @('--toggle', $a)
+    $viewerLog = Join-Path $data 'logs\viewer.log'
+    $deadline = [DateTime]::UtcNow.AddSeconds(8)
+    $inExit = $false
+    while (-not $inExit -and [DateTime]::UtcNow -lt $deadline) {
+        $inExit = (Test-Path $viewerLog) -and ([IO.File]::ReadAllText($viewerLog) -match 'Server exit sequence')
+        if (-not $inExit) { Start-Sleep -Milliseconds 20 }
+    }
+    Check 'stalled exit: Viewer entered its exit sequence' $inExit
+    $shownBefore = LogCount 'toggle_acked shown=1'
+    $null = Invoke-Daemon @('--toggle', $a)
+    Check 'stalled exit: Space during the exit sequence is acked' (Wait-Log 'toggle_acked shown=1' 6000 ($shownBefore + 1)) "(before $shownBefore)"
+    Check 'stalled exit: no deliver failed' ((LogCount 'deliver failed') -eq 0)
+    $env:FASTLOOK_TEST_EXIT_STALL_MS = $null
     $env:FASTLOOK_IDLE_SECONDS = $null
 
     Check 'final --shutdown exits 0' ((Invoke-Daemon @('--shutdown')) -eq 0)
