@@ -26,7 +26,6 @@ namespace fastlook::viewer
         constexpr wchar_t kGlyphOpenWith[] = L"";
         constexpr wchar_t kGlyphFolder[] = L"";
         constexpr wchar_t kGlyphPin[] = L"";
-        constexpr wchar_t kGlyphClose[] = L"";
 
         FontIcon MakeGlyph(wchar_t const* glyph)
         {
@@ -191,12 +190,6 @@ namespace fastlook::viewer
             m_pin.Content(MakeGlyph(kGlyphPin));
             m_pin.Click([raise](auto const&, auto const&) { raise(Command::Pin); });
             buttons.Children().Append(m_pin);
-        }
-        {
-            auto close = MakeButton(Str(L"Common", L"Close"));
-            close.Content(MakeGlyph(kGlyphClose));
-            close.Click([raise](auto const&, auto const&) { raise(Command::Close); });
-            buttons.Children().Append(close);
         }
 
         m_inset = Border{};

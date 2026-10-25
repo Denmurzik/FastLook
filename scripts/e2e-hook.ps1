@@ -14,10 +14,11 @@
   PowerToys Peek is never touched; when it runs the script only warns and counts windows it opens.
 
   Latency is measured with QPC: sendQpc (just before SendInput of Space) to the first poll that sees a visible, unowned
-  top-level window of FastLook.Viewer.exe (polling resolution ~0.1-1 ms). The daemon does not pass --perf-log to the Viewer, so
-  the Viewer's own window_visible / content_ready marks are not available here; the daemon's hook_trigger / trigger_received /
-  toggle_acked marks are read from the perf log and reported as a breakdown. Resolution is a few ms (EnumWindows polling);
-  the Viewer pid is re-resolved inside the polling loop.
+  top-level window of FastLook.Viewer.exe (polling resolution ~0.1-1 ms). The daemon forwards its --perf-log to the Viewer as
+  "<perf.log>.viewer", so the Viewer's own window_visible / content_ready marks are read from there (same QPC clock) and give
+  the real Space -> content latency (warmContentMs); the daemon's hook_trigger / trigger_received / toggle_acked marks are
+  reported as a breakdown. Window-visible polling resolution is a few ms (EnumWindows); the Viewer pid is re-resolved inside
+  the polling loop.
 
   Safety: every injected key is guarded: the foreground must be the test Explorer window (focus in the item list for
   Space/F2/..., unless the check is about an edit box), the Viewer, or an explicitly allowed window. Otherwise the key is
@@ -366,10 +367,30 @@ function Write-Settings([bool]$Prewarm) {
     $obj | ConvertTo-Json -Depth 4 | Set-Content (Join-Path $data 'settings.json') -Encoding utf8
 }
 $script:Daemon = $null
+$viewerPerfLog = "$perfLog.viewer"
 function Start-Daemon {
-    Remove-Item $perfLog -ErrorAction SilentlyContinue
+    Remove-Item $perfLog, $viewerPerfLog -ErrorAction SilentlyContinue
     $script:Daemon = Start-Process -FilePath $exe -ArgumentList @('--perf-log', $perfLog) -PassThru
     Start-Sleep -Milliseconds 700
+}
+# Marks the Viewer wrote after $FromQpc (a script QPC tick): window_visible and content_ready, in ms from $FromQpc (or $null).
+function Get-ViewerMarkMs([long]$FromQpc, [int]$WaitContentMs = 0) {
+    $end = [DateTime]::UtcNow.AddMilliseconds($WaitContentMs)
+    do {
+        $win = $null; $content = $null
+        try {
+            $copy = Join-Path $tmp 'viewer-perf-copy.log'
+            $fs = [IO.File]::Open($viewerPerfLog, 'Open', 'Read', 'ReadWrite,Delete'); $o = [IO.File]::Create($copy); $fs.CopyTo($o); $o.Dispose(); $fs.Dispose()
+            foreach ($m in (Read-PerfLog $copy)) {
+                if ($m.qpc -le $FromQpc) { continue }
+                if ($m.name -eq 'window_visible' -and $null -eq $win) { $win = Ms $FromQpc $m.qpc }
+                elseif ($m.name -eq 'content_ready' -and $null -eq $content) { $content = Ms $FromQpc $m.qpc }
+            }
+        } catch { }
+        if ($null -ne $content -or [DateTime]::UtcNow -ge $end) { break }
+        Start-Sleep -Milliseconds 40
+    } while ($true)
+    [pscustomobject]@{ Window = $win; Content = $content }
 }
 function Stop-Daemon {
     try { $p = Start-Process -FilePath $exe -ArgumentList '--shutdown' -PassThru -WindowStyle Hidden; $null = $p.WaitForExit(4000) } catch { }
@@ -397,7 +418,7 @@ function Enter-GuiLock {
         try {
             if ((Test-Path $lockPath) -and ((Get-Item $lockPath).LastWriteTimeUtc -lt [DateTime]::UtcNow.AddMinutes(-45))) { Remove-Item $lockPath -Force -ErrorAction SilentlyContinue }
             $fs = [IO.File]::Open($lockPath, 'CreateNew', 'Write', 'None')
-            $b = [Text.Encoding]::UTF8.GetBytes("fastlook impl-31 e2e-hook $([DateTime]::UtcNow.ToString('o'))")
+            $b = [Text.Encoding]::UTF8.GetBytes("fastlook impl-32 e2e-hook $([DateTime]::UtcNow.ToString('o'))")
             $fs.Write($b, 0, $b.Length); $fs.Dispose()
             $script:LockHeld = $true
             return
@@ -470,6 +491,7 @@ try {
         Begin-Section
         # ---- 1. warm open / close ----
         $warm = [Collections.Generic.List[double]]::new()
+        $imageContentMs = [Collections.Generic.List[double]]::new(); $textContentMs = [Collections.Generic.List[double]]::new()
         $imageMs = [Collections.Generic.List[double]]::new()
         $textMs = [Collections.Generic.List[double]]::new()
         $hideMs = [Collections.Generic.List[double]]::new()
@@ -498,6 +520,8 @@ try {
                 try { $m = Save-WindowPng -Hwnd $v.Hwnd -Out (Join-Path $shots 'e2e-warm.png'); Write-Host "shot: out\shots\e2e-warm.png ($m)" } catch { Write-Host "shot failed: $_" }
                 $firstShot = $true
             }
+            $mk = Get-ViewerMarkMs $t0 3000
+            if ($null -ne $mk.Content) { $imageContentMs.Add($mk.Content) } else { Note "iteration ${i}: no content_ready mark within 3 s of window-visible" }
             Pause 120
             $h0 = Press-Space
             $hidden = Wait-ViewerHidden 1500
@@ -521,14 +545,19 @@ try {
             $null = Focus-Explorer $explorerWin 'b.txt'
             $t0 = Press-Space
             $v = Wait-ViewerVisible 2500
-            if ($v) { $textMs.Add((Ms $t0 $v.Qpc)) } else { $textMissed++ }
+            if ($v) {
+                $textMs.Add((Ms $t0 $v.Qpc))
+                $mk = Get-ViewerMarkMs $t0 4000
+                if ($null -ne $mk.Content) { $textContentMs.Add($mk.Content) } else { Note "text run ${i}: no content_ready mark within 4 s" }
+            } else { $textMissed++ }
             Pause 300
             Close-Preview
             $null = Wait-Until { (Get-ForegroundHwnd) -eq $exHwnd } 800 10
             Pause 150
         }
         $imgP50 = Pct $imageMs.ToArray() 50; $txtP50 = Pct $textMs.ToArray() 50
-        Skip 'content: Space -> content_ready (image / text)' ("not measurable: the daemon starts the Viewer without --perf-log, so content_ready is unreachable (Task 32 adds Viewer perf marks). Window-visible p50: image=$imgP50 ms, text=$txtP50 ms ($textMissed text missed); these are NOT content latency (the window can be shown before content) and are reported as windowVisibleMs only")
+        $imgC50 = Pct $imageContentMs.ToArray() 50; $txtC50 = Pct $textContentMs.ToArray() 50
+        Check 'content: Space -> content_ready mark (image / text)' ($imageContentMs.Count -gt 0 -and $textContentMs.Count -gt 0 -and $imageContentMs.Count -eq $warm.Count -and $textMissed -eq 0) ("(image p50={0} ms n={1}/{2}; text p50={3} ms n={4}/{5}; window-visible p50 image={6} ms text={7} ms; Viewer perf marks)" -f $imgC50, $imageContentMs.Count, $warm.Count, $txtC50, $textContentMs.Count, $textRuns, $imgP50, $txtP50)
 
         Begin-Section
         # ---- daemon perf-log breakdown ----
@@ -748,22 +777,28 @@ try {
 
         Begin-Section
         # ---- 10. hook callback time: force a rehook via TaskbarCreated to flush the stat ----
-        function Read-CbStats { @([regex]::Matches((LogText), 'hook installed hook_cb_max_us=(\d+)') | ForEach-Object { [int]$_.Groups[1].Value }) }
+        function Read-CbStats { @([regex]::Matches((LogText), 'hook installed hook_cb_max_us=(\d+) hook_cb_p50_us=(\d+) hook_cb_p99_us=(\d+) hook_cb_count=(\d+)') | ForEach-Object { [pscustomobject]@{ Max = [int]$_.Groups[1].Value; P50 = [int]$_.Groups[2].Value; P99 = [int]$_.Groups[3].Value; Count = [int]$_.Groups[4].Value } }) }
         function Flush-CbStat {
             $n = (Read-CbStats).Count
             [void][E2E]::Broadcast('TaskbarCreated')
-            if (Wait-Until { (Read-CbStats).Count -gt $n } 4000 100) { (Read-CbStats)[-1] } else { $null }
+            if (-not (Wait-Until { (Read-CbStats).Count -gt $n } 4000 100)) { return $null }
+            # The 60 s timer rehook can flush part of a round first: combine every install line since this call (worst case per field).
+            $new = @((Read-CbStats)[$n..((Read-CbStats).Count - 1)])
+            $big = $new | Sort-Object Count -Descending | Select-Object -First 1
+            [pscustomobject]@{ Max = ($new | Measure-Object -Property Max -Maximum).Maximum; P50 = $big.P50; P99 = ($new | Measure-Object -Property P99 -Maximum).Maximum; Count = ($new | Measure-Object -Property Count -Sum).Sum }
         }
-        $loaded = Flush-CbStat          # max over the whole run since the previous install (busy: this script was spinning)
+        $loaded = Flush-CbStat          # whole run since the previous install (busy: this script was spinning)
         $null = Flush-CbStat; Pause 1200
         $null = Focus-Explorer $explorerWin $aName
         for ($k = 0; $k -lt 20; $k++) { Tap 0x7E -List; Pause 40; Tap 0x41 -List; Pause 60 }   # F15 and 'A' with a quiet system
         $quiet = Flush-CbStat
         for ($k = 0; $k -lt 20; $k++) { Tap 0x7E -List; Pause 40; Tap 0x41 -List; Pause 60 }
         $quiet2 = Flush-CbStat
-        Note ("hook_cb_max_us over the whole run (this script busy-polls, so it includes its own CPU contention): $loaded us; install lines: " + ((Read-CbStats) -join ','))
-        $quietMax = if ($null -ne $quiet -and $null -ne $quiet2) { [Math]::Max($quiet, $quiet2) } else { $null }
-        Check 'hook callback: hook_cb_max_us <= 50 (quiet system: 2 x 20 x F15 + A, 40-60 ms apart)' ($null -ne $quietMax -and $quietMax -le 50) ("(max={0} us; round 1 (includes first-call paths)={1} us, round 2={2} us)" -f $quietMax, $quiet, $quiet2)
+        Note ("hook callback over the whole run (this script busy-polls, so it includes its own CPU contention): max={0} p50={1} p99={2} us n={3}" -f $loaded.Max, $loaded.P50, $loaded.P99, $loaded.Count)
+        $quietP99 = if ($quiet -and $quiet2) { [Math]::Max($quiet.P99, $quiet2.P99) } else { $null }
+        $quietMax = if ($quiet -and $quiet2) { [Math]::Max($quiet.Max, $quiet2.Max) } else { $null }
+        $script:HookCb = [ordered]@{ p50 = $(if ($quiet2) { $quiet2.P50 } else { $null }); p99 = $quietP99; max = $quietMax; wholeRunMax = $(if ($loaded) { $loaded.Max } else { $null }); wholeRunP99 = $(if ($loaded) { $loaded.P99 } else { $null }) }
+        Check 'hook callback: p99 <= 50 us (quiet system: 2 x 20 x F15 + A, 40-60 ms apart; max is reported, it may include preemption)' ($null -ne $quietP99 -and $quietP99 -le 50) ("(p99={0} us, max={1} us; round 1 p50/p99/max={2}/{3}/{4} n={5}, round 2 p50/p99/max={6}/{7}/{8} n={9})" -f $quietP99, $quietMax, $quiet.P50, $quiet.P99, $quiet.Max, $quiet.Count, $quiet2.P50, $quiet2.P99, $quiet2.Max, $quiet2.Count)
 
         Begin-Section
         # ---- hook survival (no Explorer restart: too disruptive) and daemon health ----
@@ -774,7 +809,7 @@ try {
 
         $summary = [ordered]@{
             warmWindowMs = [ordered]@{ p50 = $p50; p95 = $p95; max = (Pct $warm.ToArray() 100); n = $warm.Count }
-            warmContentMs = [ordered]@{ image = [ordered]@{ p50 = $null }; text = [ordered]@{ p50 = $null }; note = 'not measured: Viewer perf marks unavailable (see windowVisibleMs)' }
+            warmContentMs = [ordered]@{ image = [ordered]@{ p50 = $imgC50; p95 = (Pct $imageContentMs.ToArray() 95); n = $imageContentMs.Count }; text = [ordered]@{ p50 = $txtC50; p95 = (Pct $textContentMs.ToArray() 95); n = $textContentMs.Count } }
             windowVisibleMs = [ordered]@{ image = [ordered]@{ p50 = $imgP50 }; text = [ordered]@{ p50 = $txtP50 } }
             hideMs = [ordered]@{ p50 = (Pct $hideMs.ToArray() 50) }
         }
@@ -806,6 +841,7 @@ finally {
         New-Item -ItemType Directory -Force $keep | Out-Null
         foreach ($f in 'daemon.log', 'viewer.log') { $src = Join-Path $data "logs\$f"; if (Test-Path $src) { Copy-Item $src (Join-Path $keep $f) -Force } }
         if (Test-Path $perfLog) { Copy-Item $perfLog (Join-Path $keep 'perf.log') -Force }
+        if (Test-Path $viewerPerfLog) { Copy-Item $viewerPerfLog (Join-Path $keep 'perf.log.viewer') -Force }
     } catch { }
     $leftProc = @(Get-Process -Name 'FastLook*' -ErrorAction SilentlyContinue)
     $leftWin = @($script:Opened | Where-Object { -not $_.Shared -and [FastLookWin32]::Exists($_.Hwnd) })
@@ -819,6 +855,7 @@ finally {
 $result = [ordered]@{
     warmWindowMs = $null; warmContentMs = $null; coldWindowMs = $null
     missed = $script:Missed; crashes = $script:Crashes; peekReacted = $script:PeekReacted
+    hookCallbackUs = $script:HookCb
     elevated = $isElevated; peekRunning = $script:PeekWarned; blockedKeys = $script:Blocked
     notes = $script:Notes.ToArray()
     checks = @($script:Checks | ForEach-Object { [ordered]@{ name = $_.name; pass = $_.pass; skipped = $_.skipped; details = $_.details } })

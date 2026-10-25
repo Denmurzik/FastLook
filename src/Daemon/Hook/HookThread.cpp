@@ -1,6 +1,8 @@
 #include "HookThread.h"
 
+#include <algorithm>
 #include <atomic>
+#include <iterator>
 #include <cstdint>
 #include <cstdlib>
 #include <string>
@@ -27,7 +29,12 @@ namespace fastlook::daemon
         std::atomic<uint32_t> config{0};
         std::atomic<HHOOK> hook{nullptr};
         std::atomic<uint64_t> heartbeatMs{0};
-        std::atomic<uint32_t> cbMaxUs{0};
+        // Callback duration histogram, hook thread only: 1 us buckets, the last one collects everything >= kHistBuckets - 1.
+        // Fixed size, so recording never allocates; the exact maximum is kept separately.
+        static constexpr uint32_t kHistBuckets = 256;
+        uint32_t hist[kHistBuckets]{};
+        uint32_t histCount = 0;
+        uint32_t cbMaxUs = 0;
         std::atomic<bool> abandoned{false};
         std::atomic<DWORD> threadId{0};
         HWND notify = nullptr;
@@ -91,6 +98,53 @@ namespace fastlook::daemon
             return c;
         }
 
+        uint64_t Qpc() noexcept;
+
+        void RecordCallback(Context& ctx, uint32_t us) noexcept
+        {
+            ++ctx.hist[us < Context::kHistBuckets ? us : Context::kHistBuckets - 1];
+            ++ctx.histCount;
+            ctx.cbMaxUs = us > ctx.cbMaxUs ? us : ctx.cbMaxUs;
+        }
+
+        // Smallest bucket (in us) that holds the given fraction of samples; 0 without samples.
+        uint32_t Percentile(Context const& ctx, uint32_t permille) noexcept
+        {
+            if (ctx.histCount == 0)
+            {
+                return 0;
+            }
+            uint64_t const need = (static_cast<uint64_t>(ctx.histCount) * permille + 999) / 1000;
+            uint64_t seen = 0;
+            for (uint32_t i = 0; i < Context::kHistBuckets; ++i)
+            {
+                seen += ctx.hist[i];
+                if (seen >= need)
+                {
+                    return i;
+                }
+            }
+            return Context::kHistBuckets - 1;
+        }
+
+        void ResetHistogram(Context& ctx) noexcept
+        {
+            std::fill(std::begin(ctx.hist), std::end(ctx.hist), 0u);
+            ctx.histCount = 0;
+            ctx.cbMaxUs = 0;
+        }
+
+        // Touches the code paths and pages the callback uses, so the first real key does not pay for them.
+        void WarmUp() noexcept
+        {
+            HWND const fg = GetForegroundWindow();
+            GetAsyncKeyState(VK_SHIFT);
+            Qpc();
+            core::hook::FocusSnapshot snap;
+            ProbeFocus(fg, snap);
+            ProbeFocus(fg, snap);
+        }
+
         uint64_t Qpc() noexcept
         {
             LARGE_INTEGER t;
@@ -116,6 +170,17 @@ namespace fastlook::daemon
                 return CallNextHookEx(nullptr, code, wParam, lParam);
             }
             uint64_t const t0 = Qpc();
+
+            // Decide() only looks at Space and at type-ahead keydowns: everything else passes without any further syscall.
+            if (ll.vkCode != VK_SPACE)
+            {
+                bool const down = wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN;
+                if (!down || !core::hook::IsTypeAheadKey(ll.vkCode))
+                {
+                    RecordCallback(*ctx, static_cast<uint32_t>((Qpc() - t0) * 1000000 / g_qpcFreq));
+                    return CallNextHookEx(nullptr, code, wParam, lParam);
+                }
+            }
 
             core::hook::KeySnapshot k;
             k.vk = ll.vkCode;
@@ -164,10 +229,7 @@ namespace fastlook::daemon
 
             uint64_t const t1 = Qpc();
             auto const us = static_cast<uint32_t>((t1 - t0) * 1000000 / g_qpcFreq);
-            uint32_t seen = ctx->cbMaxUs.load(std::memory_order_relaxed);
-            while (us > seen && !ctx->cbMaxUs.compare_exchange_weak(seen, us, std::memory_order_relaxed))
-            {
-            }
+            RecordCallback(*ctx, us);
 
             if (verdict == core::hook::HookVerdict::Pass)
             {
@@ -233,7 +295,9 @@ namespace fastlook::daemon
                 RemoveHook(ctx); // the watchdog gave up on this thread while it was installing
                 return;
             }
-            FL_LOG_INFO(L"hook installed hook_cb_max_us={}", ctx.cbMaxUs.exchange(0));
+            FL_LOG_INFO(L"hook installed hook_cb_max_us={} hook_cb_p50_us={} hook_cb_p99_us={} hook_cb_count={}", ctx.cbMaxUs,
+                        Percentile(ctx, 500), Percentile(ctx, 990), ctx.histCount);
+            ResetHistogram(ctx);
         }
 
         // Alt+Space was swallowed: a tagged unassigned key between Alt down and up stops Explorer showing its menu bar on Alt release.
@@ -276,6 +340,7 @@ namespace fastlook::daemon
                 }
             }
 
+            WarmUp();
             InstallHook(ctx, true);
             SetEvent(ctx.ready);
 

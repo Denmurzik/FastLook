@@ -155,6 +155,10 @@ namespace fastlook::daemon
         auto const dir = core::CurrentAppPaths().exeDir;
         auto const exe = (dir / L"FastLook.Viewer.exe").wstring();
         std::wstring cmd = std::format(L"\"{}\" --background --pipe {}", exe, pipe);
+        if (!g_perfLogPath.empty())
+        {
+            cmd += std::format(L" --perf-log \"{}.viewer\"", g_perfLogPath);
+        }
 
         STARTUPINFOW si{};
         si.cb = sizeof(si);

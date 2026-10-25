@@ -614,3 +614,29 @@ TEST(HookFilter, ImeProcessKeyArmsTypeAhead)
     h.Decide(Key(VK_PROCESSKEY, 1000), nullptr, HookConfig{});
     EXPECT_EQ(h.Decide(Space(true, 1100), &f, HookConfig{}), HookVerdict::Pass);
 }
+
+TEST(HookFilter, DesktopDefViewItselfCountsAsItemView)
+{
+    HookFilter h;
+    FocusSnapshot f{.fg = ForegroundKind::Desktop, .focusUnderDefView = true};
+    wcscpy_s(f.focusClass, L"SHELLDLL_DefView");
+    HookConfig c;
+    c.desktopEnabled = true;
+    EXPECT_EQ(h.Decide(Space(true), &f, c), HookVerdict::Trigger);
+}
+
+TEST(HookFilter, DesktopDefViewNeedsDesktopSetting)
+{
+    HookFilter h;
+    FocusSnapshot f{.fg = ForegroundKind::Desktop, .focusUnderDefView = true};
+    wcscpy_s(f.focusClass, L"SHELLDLL_DefView");
+    EXPECT_EQ(h.Decide(Space(true), &f, HookConfig{}), HookVerdict::Pass);
+}
+
+TEST(HookFilter, ExplorerDefViewItselfStillPasses)
+{
+    HookFilter h;
+    FocusSnapshot f{.fg = ForegroundKind::Explorer, .focusUnderDefView = true};
+    wcscpy_s(f.focusClass, L"SHELLDLL_DefView");
+    EXPECT_EQ(h.Decide(Space(true), &f, HookConfig{}), HookVerdict::Pass);
+}

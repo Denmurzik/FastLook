@@ -56,6 +56,7 @@ namespace fastlook::daemon
         if (!args.perfLog.empty())
         {
             core::perf::Open(args.perfLog);
+            g_perfLogPath = args.perfLog;
         }
         FL_LOG_INFO(L"daemon start");
         SetLanguage(m_settings.general.language);

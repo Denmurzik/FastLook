@@ -99,7 +99,9 @@ namespace fastlook::core::hook
         if (f->fg == ForegroundKind::Desktop ? !c.desktopEnabled : f->fg != ForegroundKind::Explorer) return HookVerdict::Pass;
         if (f->guiFlags & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE | GUI_INMOVESIZE)) return HookVerdict::Pass;
         if (f->hasCaret && IsEditClass(f->caretClass)) return HookVerdict::Pass;
-        if (!f->focusUnderDefView || !IsItemViewClass(f->focusClass)) return HookVerdict::Pass;
+        // Keyboard-only desktop use (Win+D, arrows) leaves focus on the desktop's SHELLDLL_DefView itself, which is the item view there.
+        bool const desktopView = f->fg == ForegroundKind::Desktop && EqualsI(f->focusClass, L"SHELLDLL_DefView");
+        if (!f->focusUnderDefView || !(IsItemViewClass(f->focusClass) || desktopView)) return HookVerdict::Pass;
         if (m_typeValid && m_typeThread == k.fgThreadId && k.timeMs - m_typeTime < kTypeAheadWindowMs) // uint32 wrap-safe
         {
             m_typeTime = k.timeMs; // a space typed into the search string extends the window
