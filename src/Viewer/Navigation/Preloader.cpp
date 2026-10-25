@@ -142,7 +142,11 @@ namespace fastlook::viewer
 
     winrt::Windows::Foundation::IAsyncAction Preloader::Await(winrt::Windows::Foundation::IAsyncAction inner)
     {
-        co_await inner; // cancelling this action cancels `inner`; a failure of `inner` rethrows here
+        // C++/WinRT does not forward cancellation to an awaited action unless asked: without this, cancelling the wrapper (Retire)
+        // would leave the adopted PrepareAsync running.
+        auto const token = co_await winrt::get_cancellation_token();
+        token.enable_propagation();
+        co_await inner; // a failure of `inner` rethrows here
     }
 
     void Preloader::Clear()
