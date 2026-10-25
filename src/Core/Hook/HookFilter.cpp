@@ -9,6 +9,7 @@ namespace fastlook::core::hook
     namespace
     {
         constexpr uint32_t kTypeAheadWindowMs = 1000;
+        constexpr uint32_t kStaleHeldMs = 1500; // longer than any keyboard autorepeat delay or interval
 
         bool ModifiersMatch(ActivationKey key, KeySnapshot const& k) noexcept
         {
@@ -86,9 +87,14 @@ namespace fastlook::core::hook
             bool s = std::exchange(m_swallowing, false);
             return s ? HookVerdict::Swallow : HookVerdict::Pass;
         }
+        if (m_held && k.timeMs - m_lastDownTime > kStaleHeldMs)
+        {
+            m_held = false; // no keydown for longer than any autorepeat gap: the previous key-up was lost
+            m_swallowing = false;
+        }
+        m_lastDownTime = k.timeMs;
         if (m_held) return m_swallowing ? HookVerdict::Swallow : HookVerdict::Pass; // autorepeat
         m_held = true;
-        m_swallowing = false; // a stale flag means the previous key-up was lost
         if (c.paused || !f || !ModifiersMatch(c.key, k)) return HookVerdict::Pass;
         if (f->fg == ForegroundKind::Desktop ? !c.desktopEnabled : f->fg != ForegroundKind::Explorer) return HookVerdict::Pass;
         if (f->guiFlags & (GUI_INMENUMODE | GUI_POPUPMENUMODE | GUI_SYSTEMMENUMODE | GUI_INMOVESIZE)) return HookVerdict::Pass;

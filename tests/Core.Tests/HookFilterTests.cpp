@@ -564,20 +564,34 @@ TEST(HookFilter, ResetClearsHeldAndTypeAhead)
     EXPECT_EQ(h.Decide(Space(true, 1100), &f, c), HookVerdict::Trigger);
 }
 
-TEST(HookFilter, StaleSwallowIsHealedOnNextFreshKeyDown)
+TEST(HookFilter, LostKeyUpIsHealedByNextFreshKeyDown)
 {
     HookFilter h;
     auto list = ListFocus();
     HookConfig c;
-    EXPECT_EQ(h.Decide(Space(true), &list, c), HookVerdict::Trigger);
-    EXPECT_EQ(h.Decide(Space(false), &list, c), HookVerdict::Swallow);
-    // m_held is clear; a fresh keydown that passes must not be reported as swallowed afterwards
+    EXPECT_EQ(h.Decide(Space(true, 5000), &list, c), HookVerdict::Trigger);
+    // key-up never delivered; 2 s later the user renames a file
     auto edit = ListFocus();
     edit.hasCaret = true;
     wcscpy_s(edit.caretClass, L"Edit");
-    EXPECT_EQ(h.Decide(Space(true, 6000), &edit, c), HookVerdict::Pass);
-    EXPECT_EQ(h.Decide(Space(true, 6050), &edit, c), HookVerdict::Pass);
-    EXPECT_EQ(h.Decide(Space(false, 6100), &edit, c), HookVerdict::Pass);
+    EXPECT_EQ(h.Decide(Space(true, 7000), &edit, c), HookVerdict::Pass);
+    EXPECT_EQ(h.Decide(Space(false, 7050), &edit, c), HookVerdict::Pass);
+    // and the other direction: a lost key-up after a Pass must not make the next press pass
+    EXPECT_EQ(h.Decide(Space(true, 9000), &edit, c), HookVerdict::Pass);
+    EXPECT_EQ(h.Decide(Space(true, 11000), &list, c), HookVerdict::Trigger);
+}
+
+TEST(HookFilter, AutorepeatThirtyMsApartIsStillRepeat)
+{
+    HookFilter h;
+    auto f = ListFocus();
+    HookConfig c;
+    EXPECT_EQ(h.Decide(Space(true, 5000), &f, c), HookVerdict::Trigger);
+    for (uint32_t t = 5500; t < 8000; t += 30)
+    {
+        ASSERT_EQ(h.Decide(Space(true, t), &f, c), HookVerdict::Swallow) << "t=" << t;
+    }
+    EXPECT_EQ(h.Decide(Space(false, 8000), &f, c), HookVerdict::Swallow);
 }
 
 TEST(HookFilter, SpaceInsideTypeAheadWindowExtendsIt)

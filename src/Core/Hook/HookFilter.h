@@ -61,7 +61,8 @@ namespace fastlook::core::hook
         HookVerdict Decide(KeySnapshot const& k, FocusSnapshot const* focus /*only for activation keydown*/, HookConfig const& c) noexcept;
 
         // Forgets held/swallow/type-ahead state. Call on hook (re)install and on session change (lock, UAC desktop),
-        // where a Space key-up may have been lost.
+        // where a Space key-up may have been lost. Not thread-safe: Decide() and Reset() must both run on the hook
+        // thread (Task 27 posts a message to that thread to request a reset).
         void Reset() noexcept;
 
     private:
@@ -70,5 +71,6 @@ namespace fastlook::core::hook
         bool m_typeValid = false;
         uint32_t m_typeThread = 0;
         uint32_t m_typeTime = 0;
+        uint32_t m_lastDownTime = 0;
     };
 }
