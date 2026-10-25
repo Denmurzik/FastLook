@@ -16,7 +16,14 @@
   Latency is measured with QPC: sendQpc (just before SendInput of Space) to the first poll that sees a visible, unowned
   top-level window of FastLook.Viewer.exe (polling resolution ~0.1-1 ms). The daemon does not pass --perf-log to the Viewer, so
   the Viewer's own window_visible / content_ready marks are not available here; the daemon's hook_trigger / trigger_received /
-  toggle_acked marks are read from the perf log and reported as a breakdown.
+  toggle_acked marks are read from the perf log and reported as a breakdown. Resolution is a few ms (EnumWindows polling);
+  the Viewer pid is re-resolved inside the polling loop.
+
+  Safety: every injected key is guarded: the foreground must be the test Explorer window (focus in the item list for
+  Space/F2/..., unless the check is about an edit box), the Viewer, or an explicitly allowed window. Otherwise the key is
+  NOT sent, the section's checks become SKIP and a BLOCKED note is recorded. The script holds %TEMP%\gui-e2e.lock
+  (waits until absent, creates it, deletes it in `finally`) so other GUI suites wait. `TaskbarCreated` is broadcast to all
+  top-level windows to force a rehook (every tray app re-adds its icon).
 .PARAMETER Iterations  Warm open/close cycles (default 20).
 .PARAMETER Cold        Measure only the cold start (prewarm off, 5 runs, the Viewer is killed between runs).
 .PARAMETER OutJson     Where the JSON summary goes (default out/e2e.json).
@@ -91,6 +98,16 @@ public static class E2E
         public int l, t, r, b;
     }
     [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint tid, ref GUITHREADINFO i);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    // The window that has keyboard focus in the foreground thread (the control, not the frame).
+    public static IntPtr FocusHwnd()
+    {
+        IntPtr fg = GetForegroundWindow();
+        if (fg == IntPtr.Zero) return IntPtr.Zero;
+        uint pid; uint tid = GetWindowThreadProcessId(fg, out pid);
+        var gi = new GUITHREADINFO(); gi.cbSize = Marshal.SizeOf(typeof(GUITHREADINFO));
+        return GetGUIThreadInfo(tid, ref gi) ? gi.hwndFocus : IntPtr.Zero;
+    }
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassNameW(IntPtr h, System.Text.StringBuilder sb, int n);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, System.Text.StringBuilder sb, int n);
 
@@ -130,7 +147,19 @@ $script:PeekWarned = $false
 $script:Notes = [Collections.Generic.List[string]]::new()
 $freq = [double][FastLookWin32]::QpcFreq()
 
+$script:ExHwnd = [IntPtr]::Zero
+$script:Allowed = @()
+$script:Blocked = 0
+$script:SectionBlocked = 0
+$script:OrigHkl = $null
+$script:OrigFocus = [IntPtr]::Zero
+function Begin-Section { $script:SectionBlocked = $script:Blocked }
 function Check([string]$Name, [bool]$Ok, [string]$Detail = '') {
+    if ($script:PeekWarned) { Test-PeekWindow }
+    if ($script:Blocked -gt $script:SectionBlocked) {
+        Skip $Name ("a key was blocked because the foreground left the test window ({0} blocked in this section); would have been ok={1} {2}" -f ($script:Blocked - $script:SectionBlocked), $Ok, $Detail)
+        return
+    }
     $script:Checks.Add([pscustomobject]@{ name = $Name; pass = $Ok; skipped = $false; details = $Detail })
     if ($Ok) { Write-Host "PASS $Name $Detail" } else { Write-Host "FAIL $Name $Detail"; $script:Failed = $true }
 }
@@ -157,8 +186,44 @@ function Wait-Until([scriptblock]$Cond, [int]$TimeoutMs, [int]$PollMs = 5) {
 }
 function Desc([IntPtr]$H) { [E2E]::Describe($H) }
 function Pause([int]$Ms) { Start-Sleep -Milliseconds $Ms }
-function Tap([int]$Vk) { Send-Key -Vk $Vk }
-function Chord([int]$Mod, [int]$Vk) { Send-Key -Vk $Mod -Down; Tap $Vk; Send-Key -Vk $Mod -Up }
+# $null = the foreground is an acceptable injection target; otherwise the reason. $List: focus must be in the item list.
+function Get-InjectionBlocker([bool]$List) {
+    $fg = Get-ForegroundHwnd
+    if ($fg -eq [IntPtr]::Zero) { return 'no foreground window' }
+    if ($script:ViewerPid -ne 0 -and $fg -eq [FastLookWin32]::FindTopWindow([uint32]$script:ViewerPid)) { return $null }
+    if ($fg -eq $script:ExHwnd -or ($script:Allowed -contains [int64]$fg)) {
+        if ($List) {
+            $d = Desc $fg
+            if ($d -notmatch 'focus=(DirectUIHWND|SysListView32)$') { return "focus is not in the item list [$d]" }
+        }
+        return $null
+    }
+    "foreground is another window [$(Desc $fg)]"
+}
+function Guard([string]$What, [bool]$List) {
+    $why = Get-InjectionBlocker $List
+    if (-not $why) { return $true }
+    $script:Blocked++
+    Note "BLOCKED $What : $why"
+    $false
+}
+function Tap([int]$Vk, [switch]$List) { if (Guard "key 0x$($Vk.ToString('X'))" $List.IsPresent) { Send-Key -Vk $Vk } }
+function Chord([int]$Mod, [int]$Vk, [switch]$List) {
+    if (-not (Guard "chord 0x$($Mod.ToString('X'))+0x$($Vk.ToString('X'))" $List.IsPresent)) { return }
+    Send-Key -Vk $Mod -Down; Send-Key -Vk $Vk; Send-Key -Vk $Mod -Up
+}
+# Sets the input layout of the focused control's thread; $true when that thread really has it afterwards.
+function Ensure-Layout([string]$Klid) {
+    if (-not (Guard "layout $Klid" $false)) { return $false }
+    $f = [E2E]::FocusHwnd(); if ($f -eq [IntPtr]::Zero) { $f = $script:ExHwnd }
+    $hkl = [E2E]::LoadKeyboardLayoutW($Klid, 0)
+    foreach ($t in @($f, $script:ExHwnd)) { [E2E]::PostMessageW($t, 0x0050, [IntPtr]::Zero, $hkl) | Out-Null }   # WM_INPUTLANGCHANGEREQUEST
+    Pause 400
+    $now = [E2E]::GetKeyboardLayout([E2E]::Tid($f))
+    $ok = (($now.ToInt64() -band 0xFFFF) -eq ($hkl.ToInt64() -band 0xFFFF))
+    Note ("layout {0}: wanted 0x{1:X}, focus thread has 0x{2:X} -> {3}" -f $Klid, $hkl.ToInt64(), $now.ToInt64(), $ok)
+    $ok
+}
 
 # ---------- Viewer window polling ----------
 $script:ViewerPid = 0
@@ -190,13 +255,18 @@ function Wait-ViewerVisible([int]$TimeoutMs) {
 }
 function Test-ViewerVisible { (Get-ViewerHwnd) -ne [IntPtr]::Zero }
 function Wait-ViewerHidden([int]$TimeoutMs) { Wait-Until { -not (Test-ViewerVisible) } $TimeoutMs 2 }
-function Press-Space { $q = [FastLookWin32]::QpcNow(); Send-Key -Vk $VK.Space; $q }
+# Returns the QPC just before the key, or $null when blocked. -Anywhere: the check is about an edit box (no list-focus requirement).
+function Press-Space([switch]$Anywhere) {
+    if (-not (Guard 'Space' (-not $Anywhere.IsPresent))) { return $null }
+    $q = [FastLookWin32]::QpcNow(); Send-Key -Vk $VK.Space; $q
+}
 
 function Test-PeekWindow {
     $w = @(Find-Process-Windows -Name 'PowerToys.Peek.UI' | Where-Object { $_.Visible })
     if ($w.Count -gt 0) {
         $script:PeekReacted++
-        foreach ($x in $w) { if (Set-ForegroundSafe -Hwnd $x.Hwnd -TimeoutMs 800) { Tap $VK.Esc } }
+        foreach ($x in $w) { $script:Allowed = @([int64]$x.Hwnd); if (Set-ForegroundSafe -Hwnd $x.Hwnd -TimeoutMs 800) { Tap $VK.Esc } }
+        $script:Allowed = @()
         Pause 200
     }
 }
@@ -252,7 +322,13 @@ function Open-Explorer([string]$Path) {
     if (-not (Wait-Until { $script:found = Find-ShellWindow $Path; [bool]$script:found } 8000 100)) { return $null }
     $win = $script:found
     $hwnd = [IntPtr][int64]$win.HWND
-    $script:Opened.Add(@{ Hwnd = $hwnd; Shared = ($before -contains [int64]$hwnd) })
+    $shared = ($before -contains [int64]$hwnd)
+    $script:Opened.Add(@{ Hwnd = $hwnd; Shared = $shared })
+    if ($shared) {
+        try { $win.Quit() } catch { }   # closes only the tab we just opened
+        throw 'Shell.Application.Open landed in an existing Explorer window (tab); close your Explorer windows and re-run (the test never injects keys into a user window)'
+    }
+    $script:ExHwnd = $hwnd
     $win
 }
 function Explorer-Hwnd($win) { [IntPtr][int64]$win.HWND }
@@ -311,8 +387,29 @@ function Close-Preview {
     Wait-ViewerHidden 1500 | Out-Null
 }
 
+$lockPath = Join-Path ([IO.Path]::GetTempPath()) 'gui-e2e.lock'
+$script:LockHeld = $false
+function Enter-GuiLock {
+    $end = [DateTime]::UtcNow.AddMinutes(20)
+    while ($true) {
+        try {
+            if ((Test-Path $lockPath) -and ((Get-Item $lockPath).LastWriteTimeUtc -lt [DateTime]::UtcNow.AddMinutes(-45))) { Remove-Item $lockPath -Force -ErrorAction SilentlyContinue }
+            $fs = [IO.File]::Open($lockPath, 'CreateNew', 'Write', 'None')
+            $b = [Text.Encoding]::UTF8.GetBytes("fastlook impl-31 e2e-hook $([DateTime]::UtcNow.ToString('o'))")
+            $fs.Write($b, 0, $b.Length); $fs.Dispose()
+            $script:LockHeld = $true
+            return
+        } catch [IO.IOException] {
+            if ([DateTime]::UtcNow -gt $end) { throw "desktop lock $lockPath is held by someone else for 20 min" }
+            Start-Sleep -Seconds 2
+        }
+    }
+}
+
 $explorerWin = $null
 try {
+    Enter-GuiLock
+    $script:Deadline = [DateTime]::UtcNow.AddSeconds(300 + [Math]::Ceiling($Iterations * 1.5))
     Write-Host 'WARNING: e2e-hook takes keyboard focus; do not touch keyboard/mouse until it finishes.'
     $env:FASTLOOK_DATA_DIR = $data
     $env:FASTLOOK_IDLE_SECONDS = $null
@@ -333,7 +430,7 @@ try {
             $null = Focus-Explorer $explorerWin $aName
             Pause 150
             $t0 = Press-Space
-            $v = Wait-ViewerVisible 3000
+            $v = if ($null -ne $t0) { Wait-ViewerVisible 3000 } else { $null }
             if ($v) { $coldRuns.Add((Ms $t0 $v.Qpc)); Write-Host ("cold run {0}: {1:N0} ms" -f $i, (Ms $t0 $v.Qpc)) } else { $coldMissed++ }
             Pause 500
             Close-Preview
@@ -351,15 +448,13 @@ try {
         if (-not $explorerWin) { Check 'setup: Explorer window opened' $false; throw 'no Explorer window' }
         $exHwnd = Explorer-Hwnd $explorerWin
 
-        # Latin test keys need the English layout (the user's default may be Russian): switch the Explorer thread, restore in finally.
-        $exTid = [E2E]::Tid($exHwnd)
-        $script:OrigHkl = [E2E]::GetKeyboardLayout($exTid)
-        $script:ExHwnd = $exHwnd
-        $en = [E2E]::LoadKeyboardLayoutW('00000409', 0)
-        [E2E]::PostMessageW($exHwnd, 0x0050, [IntPtr]::Zero, $en) | Out-Null
-        Pause 500
-        Note ("Explorer layout: original=0x{0:X} now=0x{1:X}" -f $script:OrigHkl.ToInt64(), [E2E]::GetKeyboardLayout($exTid).ToInt64())
+        # Remember the user's layout (of the focused control's thread); Latin checks switch to English, restored in finally.
+        $script:OrigFocus = [E2E]::FocusHwnd()
+        if ($script:OrigFocus -eq [IntPtr]::Zero) { $script:OrigFocus = $exHwnd }
+        $script:OrigHkl = [E2E]::GetKeyboardLayout([E2E]::Tid($script:OrigFocus))
+        Note ("original layout 0x{0:X}" -f $script:OrigHkl.ToInt64())
 
+        Begin-Section
         # ---- prewarm does not steal focus ----
         if (-not (Focus-Explorer $explorerWin $aName)) { Check 'setup: focus Explorer' $false 'could not focus Explorer'; throw 'could not focus Explorer' }
         $fgBeforePrewarm = Get-ForegroundHwnd
@@ -370,16 +465,19 @@ try {
         Check 'prewarm: hidden Viewer started after Explorer got focus' $pw $(if ($pw) { "(pid $script:ViewerPid after $($sw.ElapsedMilliseconds) ms)" } else { '(no Viewer within 6 s; later Space runs are then cold-ish)' })
         Check 'prewarm: foreground unchanged and no Viewer window visible' ((Get-ForegroundHwnd) -eq $fgBeforePrewarm -and -not (Test-ViewerVisible)) ("(fg now [{0}], was [{1}])" -f (Desc (Get-ForegroundHwnd)), (Desc $fgBeforePrewarm))
 
+        Begin-Section
         # ---- 1. warm open / close ----
         $warm = [Collections.Generic.List[double]]::new()
         $imageMs = [Collections.Generic.List[double]]::new()
         $textMs = [Collections.Generic.List[double]]::new()
         $hideMs = [Collections.Generic.List[double]]::new()
-        $noForeground = 0; $focusLost = 0; $notHidden = 0; $lastPid = 0
+        $noForeground = 0; $focusLost = 0; $notHidden = 0; $lastPid = 0; $blockedIters = 0; $aborted = $false
         $firstShot = $false
         for ($i = 1; $i -le $Iterations; $i++) {
-            if (-not (Focus-Explorer $explorerWin $aName)) { Check 'warm: focus Explorer' $false "iteration ${i}: could not focus Explorer"; break }
+            if (-not (Daemon-Alive)) { $script:Crashes++; Note "daemon died before iteration $i"; break }
+            if (-not (Focus-Explorer $explorerWin $aName)) { Note "iteration ${i}: could not focus Explorer"; $aborted = $true; break }
             $t0 = Press-Space
+            if ($null -eq $t0) { $blockedIters++; Pause 300; continue }
             $v = Wait-ViewerVisible 2000
             if (-not $v) {
                 $script:Missed++
@@ -407,11 +505,13 @@ try {
             Pause 150
         }
         $p50 = Pct $warm.ToArray() 50; $p95 = Pct $warm.ToArray() 95
-        Check 'warm: Space -> Viewer window <= 2 s' ($script:Missed -eq 0 -and $warm.Count -gt 0) ("iterations=$Iterations missed=$script:Missed p50=$p50 ms p95=$p95 ms (target warm <= 50 ms)")
+        $accounted = ($warm.Count + $script:Missed + $blockedIters -eq $Iterations)
+        Check 'warm: Space -> Viewer window <= 2 s, every iteration completed' ($script:Missed -eq 0 -and $warm.Count -eq $Iterations -and $accounted -and -not $aborted) ("iterations=$Iterations completed=$($warm.Count) missed=$script:Missed blocked=$blockedIters aborted=$aborted p50=$p50 ms p95=$p95 ms (target warm <= 50 ms)")
         Check 'warm: Viewer has foreground right after Space' ($noForeground -eq 0) "(not foreground within 700 ms in $noForeground of $($warm.Count) opens)"
         Check 'warm: second Space (Viewer foreground) hides it' ($notHidden -eq 0) ("(not hidden in $notHidden of $($warm.Count); hide p50={0} ms)" -f (Pct $hideMs.ToArray() 50))
         Check 'warm: focus back in Explorer after close' ($focusLost -eq 0) "(lost in $focusLost of $($warm.Count))"
 
+        Begin-Section
         # ---- 2. content ----
         $textRuns = [Math]::Min($Iterations, 10)
         $textMissed = 0
@@ -426,8 +526,9 @@ try {
             Pause 150
         }
         $imgP50 = Pct $imageMs.ToArray() 50; $txtP50 = Pct $textMs.ToArray() 50
-        Check 'content: Space -> image / text window' ($imageMs.Count -gt 0 -and $textMs.Count -gt 0) ("image p50=$imgP50 ms, text p50=$txtP50 ms, text missed=$textMissed. PROXY: Viewer perf marks are not reachable (daemon starts the Viewer without --perf-log); window_visible is marked after content_ready in PreviewSession, so this bounds Space->content_ready from above")
+        Skip 'content: Space -> content_ready (image / text)' ("not measurable: the daemon starts the Viewer without --perf-log, so content_ready is unreachable (Task 32 adds Viewer perf marks). Window-visible p50: image=$imgP50 ms, text=$txtP50 ms ($textMissed text missed); these are NOT content latency (the window can be shown before content) and are reported as windowVisibleMs only")
 
+        Begin-Section
         # ---- daemon perf-log breakdown ----
         try {
             $perfCopy = Join-Path $tmp 'perf-copy.log'
@@ -441,6 +542,7 @@ try {
             Note ("daemon perf marks: hook_trigger={0} trigger_received={1} toggle_acked={2}; hook callback -> WM_FL_TRIGGER handled p50={3} ms p95={4} ms" -f $trig.Count, $recv.Count, $ack.Count, (Pct $hookToRecv.ToArray() 50), (Pct $hookToRecv.ToArray() 95))
         } catch { Note "perf log unreadable: $_" }
 
+        Begin-Section
         # ---- 3. navigation + selection sync + Esc returns focus ----
         $null = Focus-Explorer $explorerWin $aName
         $t0 = Press-Space
@@ -475,11 +577,13 @@ try {
         }
         Pause 300
 
+        Begin-Section
         # ---- 4. rename: F2, Z, Space, Y, Enter ----
         $null = Focus-Explorer $explorerWin 'd.txt'
-        Tap $VK.F2; Pause 500
+        Tap $VK.F2 -List; Pause 500
+        $renLayout = Ensure-Layout '00000409'
         Tap 0x5A; Pause 60
-        $rt0 = Press-Space
+        $rt0 = Press-Space -Anywhere
         $rv = Wait-ViewerVisible 900
         Pause 60
         Tap 0x59; Pause 100
@@ -488,61 +592,67 @@ try {
         $renamedTo = (Get-ChildItem $folder -Filter '? ?.txt' -ErrorAction SilentlyContinue | Select-Object -First 1).Name
         if ($rv) { Close-Preview; $null = Focus-Explorer $explorerWin $aName }
         Check 'rename: no Viewer window on Space in the rename box' (-not $rv)
-        Check 'rename: the Space reached the edit box (d.txt became "<letter> <letter>.txt")' $renamed ("(files: {0})" -f ((Get-ChildItem $folder).Name -join ', '))
+        Check 'rename: the Space reached the edit box (d.txt became "<letter> <letter>.txt")' $renamed ("(English layout in the edit box: $renLayout; files: {0})" -f ((Get-ChildItem $folder).Name -join ', '))
         if ($renamed) { Rename-Item (Join-Path $folder $renamedTo) 'd.txt' }
 
+        Begin-Section
         # ---- 5. address bar ----
         $null = Focus-Explorer $explorerWin $aName
-        Chord $VK.Alt 0x44; Pause 500      # Alt+D
-        $null = Press-Space
+        Chord $VK.Alt 0x44 -List; Pause 500      # Alt+D
+        $null = Press-Space -Anywhere
         $av = Wait-ViewerVisible 900
         Check 'address bar: no Viewer window on Space (Alt+D)' (-not $av)
         if ($av) { Close-Preview }
         Tap $VK.Esc; Pause 300
 
+        Begin-Section
         # ---- 6. type-ahead (Latin) ----
         $null = Focus-Explorer $explorerWin $aName
         Pause 1300
-        Tap 0x42                            # B
-        Pause 100
-        $null = Press-Space
-        $tv = Wait-ViewerVisible 900
-        Check 'type-ahead: B then Space within 300 ms -> no Viewer' (-not $tv)
-        if ($tv) { Close-Preview }
-        Pause 1300
-        $null = Press-Space
-        $tv2 = Wait-ViewerVisible 2000
-        Check 'type-ahead: after 1.2 s Space opens the preview' ($null -ne $tv2)
-        if ($tv2) { Close-Preview; $null = Wait-Until { (Get-ForegroundHwnd) -eq $exHwnd } 800 10 }
+        $enOk = Ensure-Layout '00000409'
+        if (-not $enOk) {
+            Skip 'type-ahead (Latin layout): B then Space within 300 ms -> no Viewer' 'could not switch the focused control to the English layout'
+            Skip 'type-ahead (Latin layout): after 1.2 s Space opens the preview' 'could not switch the focused control to the English layout'
+        }
+        else {
+            Tap 0x42 -List                      # B
+            Pause 100
+            $null = Press-Space
+            $tv = Wait-ViewerVisible 900
+            Check 'type-ahead (Latin layout): B then Space within 300 ms -> no Viewer' (-not $tv)
+            if ($tv) { Close-Preview }
+            Pause 1300
+            $null = Press-Space
+            $tv2 = Wait-ViewerVisible 2000
+            Check 'type-ahead (Latin layout): after 1.2 s Space opens the preview' ($null -ne $tv2)
+            if ($tv2) { Close-Preview; $null = Wait-Until { (Get-ForegroundHwnd) -eq $exHwnd } 800 10 }
+        }
 
+        Begin-Section
         # ---- 6b. type-ahead with the Russian layout (OEM key) ----
         $ruInstalled = $false
         try { $ruInstalled = [bool](Get-WinUserLanguageList | Where-Object { $_.LanguageTag -like 'ru*' }) } catch { }
         if (-not $ruInstalled) { Skip 'type-ahead (Russian layout): б then Space -> no Viewer' 'Russian keyboard layout not installed' }
         else {
             $null = Focus-Explorer $explorerWin $aName
-            $tid = [E2E]::Tid($exHwnd)
-            $oldHkl = [E2E]::GetKeyboardLayout($tid)
-            $ru = [E2E]::LoadKeyboardLayoutW('00000419', 0)
-            [E2E]::PostMessageW($exHwnd, 0x0050, [IntPtr]::Zero, $ru) | Out-Null   # WM_INPUTLANGCHANGEREQUEST
-            Pause 500
-            $switched = [E2E]::GetKeyboardLayout($tid) -eq $ru
             Pause 1300
-            Tap 0xBC                        # VK_OEM_COMMA = 'б' on the Russian layout
-            Pause 100
-            $null = Press-Space
-            $rv2 = Wait-ViewerVisible 900
-            if ($switched) { Check 'type-ahead (Russian layout): б then Space within 300 ms -> no Viewer' (-not $rv2) }
-            else { Skip 'type-ahead (Russian layout): б then Space -> no Viewer' 'could not switch the Explorer thread to the Russian layout' }
-            if ($rv2) { Close-Preview }
-            [E2E]::PostMessageW($exHwnd, 0x0050, [IntPtr]::Zero, $oldHkl) | Out-Null
-            Pause 400
+            $switched = Ensure-Layout '00000419'
+            if (-not $switched) { Skip 'type-ahead (Russian layout): б then Space -> no Viewer' 'could not switch the focused control to the Russian layout' }
+            else {
+                Tap 0xBC -List                  # VK_OEM_COMMA = 'б' on the Russian layout
+                Pause 100
+                $null = Press-Space
+                $rv2 = Wait-ViewerVisible 900
+                Check 'type-ahead (Russian layout): б then Space within 300 ms -> no Viewer' (-not $rv2)
+                if ($rv2) { Close-Preview }
+            }
         }
 
+        Begin-Section
         # ---- 7. Win11 tabs ----
         $null = Focus-Explorer $explorerWin $aName
         $firstUrl = $explorerWin.LocationURL
-        Chord $VK.Ctrl 0x54; Pause 1500     # Ctrl+T
+        Chord $VK.Ctrl 0x54 -List; Pause 1500     # Ctrl+T
         $same = @()
         foreach ($w in $shell.Windows()) { try { if ([int64]$w.HWND -eq [int64]$exHwnd) { $same += $w } } catch { } }
         $newTab = $same | Where-Object { (Local-Path $_.LocationURL) -ine $folder.TrimEnd('\') } | Select-Object -First 1
@@ -574,20 +684,26 @@ try {
                     if ($tv4) { Close-Preview; $null = Wait-Until { (Get-ForegroundHwnd) -eq $exHwnd } 800 10 }
                 }
             } catch { Skip 'tabs: active tab is previewed' "error: $_" }
+            # Ctrl+W only when the second tab exists (it was created above) and Ctrl+2 activated it
             Chord $VK.Ctrl 0x32; Pause 600   # Ctrl+2: second tab
-            Chord $VK.Ctrl 0x57; Pause 700   # Ctrl+W: close it; the first tab stays (the window is closed in finally)
+            $secondActive = $false
+            foreach ($w in $shell.Windows()) { try { if ([int64]$w.HWND -eq [int64]$exHwnd -and (Local-Path $w.LocationURL) -ieq $folder2.TrimEnd('\')) { $secondActive = $true } } catch { } }
+            if ($secondActive -and (Get-ForegroundHwnd) -eq $exHwnd) { Chord $VK.Ctrl 0x57; Pause 700 }   # Ctrl+W: close it; the first tab stays
+            else { Note 'tabs: second tab not found afterwards, Ctrl+W not sent (it is closed with the window in finally)' }
         }
 
+        Begin-Section
         # ---- 8. search box (last Explorer-window check: focus is not restored afterwards) ----
         $null = Focus-Explorer $explorerWin $aName
-        Chord $VK.Ctrl 0x45; Pause 600      # Ctrl+E
+        Chord $VK.Ctrl 0x45 -List; Pause 600      # Ctrl+E
         Tap 0x5A; Pause 60
-        $null = Press-Space
+        $null = Press-Space -Anywhere
         $sv = Wait-ViewerVisible 900
         Check 'search box: no Viewer window on Space (Ctrl+E)' (-not $sv)
         if ($sv) { Close-Preview }
         Tap $VK.Esc; Pause 200; Tap $VK.Esc; Pause 300
 
+        Begin-Section
         # ---- 9. desktop ----
         $deskFile = Join-Path ([Environment]::GetFolderPath('Desktop')) ("fastlook-e2e-{0}.txt" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
         try {
@@ -604,6 +720,7 @@ try {
                 else {
                     $disp.Document.SelectItem($item, (1 -bor 4 -bor 8 -bor 16))
                     $dhwnd = [IntPtr][int64]$dh
+                    $script:Allowed = @([int64]$dhwnd)
                     if (-not (Set-ForegroundSafe -Hwnd $dhwnd -TimeoutMs 2500)) { Skip 'desktop: Space on a desktop item opens' 'could not focus the desktop' }
                     else {
                         Pause 300
@@ -618,8 +735,9 @@ try {
                 }
             }
         } catch { Skip 'desktop: Space on a desktop item opens' "error: $_" }
-        finally { Remove-Item $deskFile -Force -ErrorAction SilentlyContinue }
+        finally { $script:Allowed = @(); Remove-Item $deskFile -Force -ErrorAction SilentlyContinue }
 
+        Begin-Section
         # ---- 10. hook callback time: force a rehook via TaskbarCreated to flush the stat ----
         function Read-CbStats { @([regex]::Matches((LogText), 'hook installed hook_cb_max_us=(\d+)') | ForEach-Object { [int]$_.Groups[1].Value }) }
         function Flush-CbStat {
@@ -630,21 +748,25 @@ try {
         $loaded = Flush-CbStat          # max over the whole run since the previous install (busy: this script was spinning)
         $null = Flush-CbStat; Pause 1200
         $null = Focus-Explorer $explorerWin $aName
-        for ($k = 0; $k -lt 20; $k++) { Tap 0x7E; Pause 40; Tap 0x41; Pause 60 }   # F15 and 'A' with a quiet system
+        for ($k = 0; $k -lt 20; $k++) { Tap 0x7E -List; Pause 40; Tap 0x41 -List; Pause 60 }   # F15 and 'A' with a quiet system
         $quiet = Flush-CbStat
-        for ($k = 0; $k -lt 20; $k++) { Tap 0x7E; Pause 40; Tap 0x41; Pause 60 }
+        for ($k = 0; $k -lt 20; $k++) { Tap 0x7E -List; Pause 40; Tap 0x41 -List; Pause 60 }
         $quiet2 = Flush-CbStat
-        Check 'hook callback: hook_cb_max_us <= 50 (whole run, script busy-polling)' ($null -ne $loaded -and $loaded -le 50) ("(max={0} us; install lines: {1})" -f $loaded, ((Read-CbStats) -join ','))
-        Check 'hook callback: hook_cb_max_us <= 50 (quiet: 20 x F15 + A, 40-60 ms apart)' ($null -ne $quiet -and $quiet -le 50) ("(max={0} us; second quiet round max={1} us)" -f $quiet, $quiet2)
+        Note ("hook_cb_max_us over the whole run (this script busy-polls, so it includes its own CPU contention): $loaded us; install lines: " + ((Read-CbStats) -join ','))
+        $quietMax = if ($null -ne $quiet -and $null -ne $quiet2) { [Math]::Max($quiet, $quiet2) } else { $null }
+        Check 'hook callback: hook_cb_max_us <= 50 (quiet system: 2 x 20 x F15 + A, 40-60 ms apart)' ($null -ne $quietMax -and $quietMax -le 50) ("(max={0} us; round 1 (includes first-call paths)={1} us, round 2={2} us)" -f $quietMax, $quiet, $quiet2)
 
+        Begin-Section
         # ---- hook survival (no Explorer restart: too disruptive) and daemon health ----
         Skip 'explorer restart: hook survives taskkill explorer' 'not run (too disruptive); the TaskbarCreated rehook above is the closest proxy'
+        if (-not (Daemon-Alive)) { $script:Crashes++ }
         Check 'daemon survived the whole run' (Daemon-Alive)
         $pidNow = if (Daemon-Alive) { $script:Daemon.Id } else { 0 }
 
         $summary = [ordered]@{
             warmWindowMs = [ordered]@{ p50 = $p50; p95 = $p95; max = (Pct $warm.ToArray() 100); n = $warm.Count }
-            warmContentMs = [ordered]@{ image = [ordered]@{ p50 = $imgP50 }; text = [ordered]@{ p50 = $txtP50 }; proxy = 'window-visible latency; Viewer perf marks unavailable' }
+            warmContentMs = [ordered]@{ image = [ordered]@{ p50 = $null }; text = [ordered]@{ p50 = $null }; note = 'not measured: Viewer perf marks unavailable (see windowVisibleMs)' }
+            windowVisibleMs = [ordered]@{ image = [ordered]@{ p50 = $imgP50 }; text = [ordered]@{ p50 = $txtP50 } }
             hideMs = [ordered]@{ p50 = (Pct $hideMs.ToArray() 50) }
         }
         $script:WarmSummary = $summary
@@ -658,7 +780,12 @@ catch {
 }
 finally {
     try { if (Test-ViewerVisible) { Close-Preview } } catch { }
-    try { if ($script:OrigHkl -and [FastLookWin32]::Exists($script:ExHwnd)) { [E2E]::PostMessageW($script:ExHwnd, 0x0050, [IntPtr]::Zero, $script:OrigHkl) | Out-Null; Pause 300 } } catch { }
+    try {
+        if ($script:OrigHkl -and [FastLookWin32]::Exists($script:ExHwnd)) {
+            foreach ($t in @($script:ExHwnd, $script:OrigFocus)) { if ($t -ne [IntPtr]::Zero) { [E2E]::PostMessageW($t, 0x0050, [IntPtr]::Zero, $script:OrigHkl) | Out-Null } }
+            Pause 300
+        }
+    } catch { }
     foreach ($entry in $script:Opened) { try { Close-Explorer $entry } catch { } }
     try { Stop-Daemon } catch { }
     Get-Process -Name 'FastLook*' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
@@ -672,15 +799,18 @@ finally {
         if (Test-Path $perfLog) { Copy-Item $perfLog (Join-Path $keep 'perf.log') -Force }
     } catch { }
     $leftProc = @(Get-Process -Name 'FastLook*' -ErrorAction SilentlyContinue)
-    $leftWin = @($script:Opened | Where-Object { -not $_.Shared -and [FastLookWin32]::Exists($_.Hwnd) })
-    Write-Host ("cleanup: FastLook processes left={0}, test Explorer windows left={1}" -f $leftProc.Count, $leftWin.Count)
+    $leftWin = @($script:Opened | Where-Object { [FastLookWin32]::Exists($_.Hwnd) })
+    $leftTabs = 0
+    try { foreach ($w in $shell.Windows()) { try { if ((Local-Path $w.LocationURL).StartsWith($tmp.TrimEnd('\'), 'OrdinalIgnoreCase')) { $leftTabs++ } } catch { } } } catch { }
+    Write-Host ("cleanup: FastLook processes left={0}, test Explorer windows left={1}, shell windows/tabs still showing the temp folders={2}" -f $leftProc.Count, $leftWin.Count, $leftTabs)
+    if ($script:LockHeld) { Remove-Item $lockPath -Force -ErrorAction SilentlyContinue }
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue
 }
 
 $result = [ordered]@{
     warmWindowMs = $null; warmContentMs = $null; coldWindowMs = $null
     missed = $script:Missed; crashes = $script:Crashes; peekReacted = $script:PeekReacted
-    elevated = $isElevated; peekRunning = $script:PeekWarned
+    elevated = $isElevated; peekRunning = $script:PeekWarned; blockedKeys = $script:Blocked
     notes = $script:Notes.ToArray()
     checks = @($script:Checks | ForEach-Object { [ordered]@{ name = $_.name; pass = $_.pass; skipped = $_.skipped; details = $_.details } })
 }
