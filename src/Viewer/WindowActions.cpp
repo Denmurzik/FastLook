@@ -36,11 +36,14 @@ namespace fastlook::viewer::actions
             {
                 return false;
             }
-            if (void* dst = GlobalLock(mem))
+            void* dst = GlobalLock(mem);
+            if (dst == nullptr)
             {
-                memcpy(dst, data, size);
-                GlobalUnlock(mem);
+                GlobalFree(mem);
+                return false;
             }
+            memcpy(dst, data, size);
+            GlobalUnlock(mem);
             if (SetClipboardData(format, mem) == nullptr)
             {
                 GlobalFree(mem);
@@ -112,7 +115,7 @@ namespace fastlook::viewer::actions
 
     bool CopyFile(HWND owner, PreviewItem const& item)
     {
-        if (item.ref.isVirtual)
+        if (item.ref.isVirtual || owner == nullptr) // no file, or no window to own the clipboard
         {
             return false;
         }
@@ -134,7 +137,12 @@ namespace fastlook::viewer::actions
             FL_LOG_INFO(L"actions::CopyFile: OpenClipboard failed, error {}", GetLastError());
             return false;
         }
-        EmptyClipboard();
+        if (!EmptyClipboard())
+        {
+            CloseClipboard();
+            FL_LOG_INFO(L"actions::CopyFile: EmptyClipboard failed, error {}", GetLastError());
+            return false;
+        }
         DWORD const effect = DROPEFFECT_COPY;
         bool const ok = SetClipboardBlob(CF_HDROP, buffer.get(), size) &&
                         SetClipboardBlob(RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT), &effect, sizeof(effect));
