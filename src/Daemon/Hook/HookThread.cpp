@@ -35,6 +35,7 @@ namespace fastlook::daemon
         // Callback-only state: the filter's own held flag is private, and ProbeFocus runs only for a fresh Space keydown.
         bool spaceHeld = false;
         uint32_t spaceDownMs = 0;
+        bool installFailLogged = false; // hook thread only
     };
 
     namespace
@@ -64,6 +65,17 @@ namespace fastlook::daemon
         thread_local Context* t_ctx = nullptr;
         std::atomic<bool> g_stallConsumed{false};
         uint64_t g_qpcFreq = 1;
+
+        static_assert(sizeof(core::hook::HookConfig) == 8, "HookConfig changed: update Pack/Unpack");
+        static_assert(static_cast<unsigned>(core::ActivationKey::ShiftSpace) <= 0xFF);
+
+        // Excludes time spent suspended, so a resume never looks like a stale heartbeat.
+        uint64_t NowMs() noexcept
+        {
+            ULONGLONG t100ns = 0;
+            QueryUnbiasedInterruptTime(&t100ns);
+            return t100ns / 10000;
+        }
 
         uint32_t Pack(core::hook::HookConfig c) noexcept
         {
@@ -172,8 +184,16 @@ namespace fastlook::daemon
             }
         }
 
+        void ResetState(Context& ctx)
+        {
+            ctx.filter.Reset();
+            ctx.spaceHeld = false;
+        }
+
         // Installs the new hook before removing the old one, so there is no gap. While paused, only removes.
-        void InstallHook(Context& ctx)
+        // resetFilter: forget held/swallow/type-ahead state; false for the periodic rehook, which has no gap and
+        // so cannot have lost a key-up (a reset there would drop a live swallow or type-ahead window).
+        void InstallHook(Context& ctx, bool resetFilter)
         {
             if (ctx.abandoned.load())
             {
@@ -186,20 +206,28 @@ namespace fastlook::daemon
                     RemoveHook(ctx);
                     FL_LOG_INFO(L"hook removed (paused)");
                 }
-                ctx.filter.Reset();
+                ResetState(ctx);
                 return;
             }
             HHOOK const fresh = SetWindowsHookExW(WH_KEYBOARD_LL, &KeyboardProc, GetModuleHandleW(nullptr), 0);
             if (!fresh)
             {
-                FL_LOG_INFO(L"hook install failed {}", GetLastError());
-                return; // keep the previous hook, if any
+                if (!ctx.installFailLogged)
+                {
+                    ctx.installFailLogged = true;
+                    FL_LOG_INFO(L"hook install failed {}", GetLastError());
+                }
+                return; // keep the previous hook, if any; the heartbeat tick retries when there is none
             }
             if (HHOOK const old = ctx.hook.exchange(fresh))
             {
                 UnhookWindowsHookEx(old);
             }
-            ctx.filter.Reset();
+            ctx.installFailLogged = false;
+            if (resetFilter)
+            {
+                ResetState(ctx);
+            }
             if (ctx.abandoned.load())
             {
                 RemoveHook(ctx); // the watchdog gave up on this thread while it was installing
@@ -232,7 +260,7 @@ namespace fastlook::daemon
             MSG msg;
             PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE); // creates the thread's message queue
             ctx.threadId = GetCurrentThreadId();
-            ctx.heartbeatMs = GetTickCount64();
+            ctx.heartbeatMs = NowMs();
 
             UINT_PTR const heartbeatTimer = SetTimer(nullptr, 0, kHeartbeatMs, nullptr);
             UINT_PTR const rehookTimer = SetTimer(nullptr, 0, kRehookMs, nullptr);
@@ -248,7 +276,7 @@ namespace fastlook::daemon
                 }
             }
 
-            InstallHook(ctx);
+            InstallHook(ctx, true);
             SetEvent(ctx.ready);
 
             while (!ctx.abandoned.load() && GetMessageW(&msg, nullptr, 0, 0) > 0)
@@ -258,12 +286,16 @@ namespace fastlook::daemon
                 case WM_TIMER:
                     if (msg.wParam == heartbeatTimer)
                     {
-                        ctx.heartbeatMs = GetTickCount64();
+                        ctx.heartbeatMs = NowMs();
+                        if (!ctx.hook.load() && !Unpack(ctx.config.load()).paused)
+                        {
+                            InstallHook(ctx, true); // an earlier install failed: do not wait for the 60 s timer
+                        }
                     }
                     else if (msg.wParam == rehookTimer)
                     {
                         FL_LOG_INFO(L"rehook reason=timer");
-                        InstallHook(ctx);
+                        InstallHook(ctx, false);
                     }
                     else if (stallTimer != 0 && msg.wParam == stallTimer)
                     {
@@ -277,13 +309,13 @@ namespace fastlook::daemon
                     }
                     break;
                 case WM_HOOK_REHOOK:
-                    InstallHook(ctx);
+                    InstallHook(ctx, true);
                     break;
                 case WM_HOOK_APPLY:
                     // Install after unpause, remove on pause; otherwise nothing changed.
                     if (Unpack(ctx.config.load()).paused == (ctx.hook.load() != nullptr))
                     {
-                        InstallHook(ctx);
+                        InstallHook(ctx, true);
                     }
                     break;
                 case WM_HOOK_ALT_FIX:
@@ -296,7 +328,11 @@ namespace fastlook::daemon
 
             KillTimer(nullptr, heartbeatTimer);
             KillTimer(nullptr, rehookTimer);
-            if (!ctx.abandoned.load())
+            if (ctx.abandoned.load())
+            {
+                FL_LOG_INFO(L"abandoned hook thread exited");
+            }
+            else
             {
                 RemoveHook(ctx);
             }
@@ -315,7 +351,7 @@ namespace fastlook::daemon
         auto ctx = std::make_shared<Context>();
         ctx->config = Pack(m_config);
         ctx->notify = m_notify;
-        ctx->heartbeatMs = GetTickCount64();
+        ctx->heartbeatMs = NowMs();
         ctx->ready = CreateEventW(nullptr, TRUE, FALSE, nullptr);
         if (!ctx->ready)
         {
@@ -391,7 +427,19 @@ namespace fastlook::daemon
 
     void HookThread::CheckWatchdog()
     {
-        if (m_stopped || !m_ctx || GetTickCount64() - m_ctx->heartbeatMs.load() <= kStaleMs)
+        if (m_stopped)
+        {
+            return;
+        }
+        if (!m_ctx) // an earlier relaunch failed: keep trying on every tick
+        {
+            if (!Launch())
+            {
+                FL_LOG_INFO(L"hook thread relaunch failed {}", GetLastError());
+            }
+            return;
+        }
+        if (NowMs() - m_ctx->heartbeatMs.load() <= kStaleMs)
         {
             return;
         }
@@ -402,6 +450,9 @@ namespace fastlook::daemon
         CloseHandle(m_thread);
         m_thread = nullptr;
         m_ctx.reset();
-        Launch();
+        if (!Launch())
+        {
+            FL_LOG_INFO(L"hook thread relaunch failed {}", GetLastError());
+        }
     }
 }

@@ -60,8 +60,8 @@ namespace fastlook::core::hook
         // focus: needed only for an activation keydown. Class-name buffers in FocusSnapshot must be NUL-terminated within 64 chars.
         HookVerdict Decide(KeySnapshot const& k, FocusSnapshot const* focus /*only for activation keydown*/, HookConfig const& c) noexcept;
 
-        // Forgets held/swallow/type-ahead state. Call on hook (re)install and on session change (lock, UAC desktop),
-        // where a Space key-up may have been lost. Not thread-safe: Decide() and Reset() must both run on the hook
+        // Forgets held/swallow/type-ahead state. Call on first install, un-pause, and wherever a Space key-up may have
+        // been lost (hook thread recreated, resume, unlock/reconnect, TaskbarCreated), not on the gapless periodic rehook. Not thread-safe: Decide() and Reset() must both run on the hook
         // thread (Task 27 posts a message to that thread to request a reset).
         void Reset() noexcept;
 

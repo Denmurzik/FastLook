@@ -50,7 +50,7 @@ function Wait-LogMatch([string]$Pattern, [int]$Count = 1, [int]$TimeoutMs = 5000
 
 function Stop-Daemon($Proc) {
     if ($Proc -and -not $Proc.HasExited) {
-        $sd = Start-Process -FilePath $exe -ArgumentList '--shutdown' -PassThru -Wait
+        [void](Start-Process -FilePath $exe -ArgumentList '--shutdown' -PassThru -Wait)
         if (-not $Proc.WaitForExit(5000)) { $Proc.Kill() }
     }
 }
@@ -98,7 +98,7 @@ try {
     Check 'stall: first hook installed' (Wait-LogMatch 'hook installed')
     Check 'stall: watchdog restart within 10 s of the stall' (Wait-LogMatch 'hook watchdog restart' 1 13000)
     Check 'stall: hook installed again after restart' (Wait-LogMatch 'hook installed' 2 3000)
-    Start-Sleep -Seconds 6 # let the abandoned thread wake up and exit
+    Check 'stall: abandoned thread exited' (Wait-LogMatch 'abandoned hook thread exited' 1 8000)
     Check 'stall: daemon still alive' (-not $daemon.HasExited)
     $ws = Get-PrivateWorkingSetMB -ProcessId $daemon.Id
     Check 'private WS <= 5 MB' ($ws -le 5) ("({0:N1} MB)" -f $ws)
@@ -112,7 +112,7 @@ catch {
 }
 finally {
     if ($daemon -and -not $daemon.HasExited) { $daemon.Kill() }
-    Get-Process -Name FastLook -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process -Name FastLook, FastLook.Viewer, FastLook.PreviewHost -ErrorAction SilentlyContinue | Stop-Process -Force
     $env:FASTLOOK_DATA_DIR = $savedData
     $env:FASTLOOK_POWERTOYS_DIR = $savedPt
     $env:FASTLOOK_TEST_STALL_HOOK_MS = $savedStall

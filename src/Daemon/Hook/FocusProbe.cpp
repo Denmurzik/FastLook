@@ -1,6 +1,7 @@
 #include "FocusProbe.h"
 
 #include <cwchar>
+#include <iterator>
 
 #include "../SharedState.h"
 
@@ -13,7 +14,7 @@ namespace fastlook::daemon
         bool ClassIs(HWND wnd, wchar_t const* name) noexcept
         {
             wchar_t buf[64];
-            return GetClassNameW(wnd, buf, 64) > 0 && wcscmp(buf, name) == 0;
+            return GetClassNameW(wnd, buf, static_cast<int>(std::size(buf))) > 0 && wcscmp(buf, name) == 0;
         }
     }
 
@@ -25,7 +26,7 @@ namespace fastlook::daemon
             return ForegroundKind::Other;
         }
         wchar_t cls[64];
-        if (GetClassNameW(fg, cls, 64) > 0)
+        if (GetClassNameW(fg, cls, static_cast<int>(std::size(cls))) > 0)
         {
             if (wcscmp(cls, L"CabinetWClass") == 0)
             {
@@ -68,7 +69,7 @@ namespace fastlook::daemon
         out.guiFlags = gti.flags;
         if (gti.hwndFocus)
         {
-            GetClassNameW(gti.hwndFocus, out.focusClass, 64);
+            GetClassNameW(gti.hwndFocus, out.focusClass, static_cast<int>(std::size(out.focusClass)));
             HWND wnd = gti.hwndFocus;
             for (int i = 0; wnd && i < kMaxAncestorLevels; ++i, wnd = GetParent(wnd))
             {
@@ -82,7 +83,7 @@ namespace fastlook::daemon
         if (gti.hwndCaret)
         {
             out.hasCaret = true;
-            GetClassNameW(gti.hwndCaret, out.caretClass, 64);
+            GetClassNameW(gti.hwndCaret, out.caretClass, static_cast<int>(std::size(out.caretClass)));
         }
     }
 }

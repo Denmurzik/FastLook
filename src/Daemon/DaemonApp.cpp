@@ -295,6 +295,10 @@ namespace fastlook::daemon
             {
                 m_hook.Rehook("unlock");
             }
+            else if (wParam == WTS_CONSOLE_CONNECT || wParam == WTS_REMOTE_CONNECT)
+            {
+                m_hook.Rehook("reconnect");
+            }
             return 0;
         case WM_TIMER:
             if (wParam == kWatchdogTimer)
