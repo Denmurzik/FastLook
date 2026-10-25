@@ -5,10 +5,10 @@ on:
     tags: ['v*']
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  build:
     runs-on: windows-2025
     env:
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\out\vcpkg-cache
@@ -64,15 +64,24 @@ jobs:
         shell: pwsh
         run: scripts/package.ps1 -NoBuild
 
-      - name: Create draft release
+      - name: Check release assets
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
-          $files = Get-ChildItem out/dist -File | ForEach-Object FullName
-          if (-not ($files | Where-Object { $_ -like '*Setup*.exe' })) { throw 'installer missing from out/dist' }
-          gh release create $env:GITHUB_REF_NAME @files --draft --title "FastLook $env:FASTLOOK_VERSION" --generate-notes
-          if ($LASTEXITCODE -ne 0) { throw "gh release create failed ($LASTEXITCODE)" }
+          $ver = $env:FASTLOOK_VERSION
+          $expected = @(
+            "FastLook-$ver-portable-x64.zip", "FastLook-$ver-portable-x64.zip.sha256",
+            "FastLook-Setup-$ver.exe", "FastLook-Setup-$ver.exe.sha256") | Sort-Object
+          $actual = @(Get-ChildItem out/dist -File | ForEach-Object Name) | Sort-Object
+          if (Compare-Object $expected $actual) {
+            throw "out/dist mismatch.`nExpected: $($expected -join ', ')`nActual: $($actual -join ', ')"
+          }
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: out/dist/*
+          if-no-files-found: error
 
       - name: Upload test results
         if: always()
@@ -89,3 +98,24 @@ jobs:
           name: msbuild-binlog
           path: out/*.binlog
           if-no-files-found: ignore
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download dist
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+
+      - name: Create draft release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" dist/* --draft --title "FastLook $ver" --generate-notes
