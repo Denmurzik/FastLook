@@ -7,7 +7,9 @@
 
 #include "Diagnostics/Log.h"
 #include "Previewers/Common/ShellInfo.h"
+#include "FileTypes/Extensions.h"
 #include "Previewers/Factories.h"
+#include "Previewers/Text/LexillaStyler.h"
 #include "Ui/Placement.h"
 #include "Util/Async.h"
 #include "Util/Str.h"
@@ -80,6 +82,7 @@ namespace fastlook::viewer
         std::weak_ptr<IPreviewer> const weak = self;
         m_doc = doc;
         m_index = state;
+        m_styler = MakeLexillaStyler(doc, core::LexerNameFor(std::filesystem::path{path}.filename().wstring()));
         m_indexThread = std::jthread([doc, state, weak, ui](std::stop_token stop) {
             try
             {
@@ -143,6 +146,7 @@ namespace fastlook::viewer
     winrt::Microsoft::UI::Xaml::UIElement TextPreviewer::View()
     {
         m_view = std::make_unique<CodeView>(m_doc);
+        m_view->SetStyler(m_styler);
         m_view->SetDark(m_ctx->dark);
         m_view->SetFontSize(static_cast<float>(m_ctx->settings.preview.codeFontSize));
         m_view->SetWrap(m_ctx->settings.preview.wordWrap);
@@ -169,6 +173,7 @@ namespace fastlook::viewer
         StopIndexing();
         m_wrapButton = nullptr;
         m_view.reset();
+        m_styler.reset(); // stops its worker
         m_index.reset();
         m_doc.reset();
     }

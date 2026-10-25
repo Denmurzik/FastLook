@@ -1,0 +1,9 @@
+{
+  "name": "fastlook",
+  "version": "1.0.0",
+  "private": true,
+  "count": 42,
+  "ratio": 3.14,
+  "tags": ["preview", "quick look", null],
+  "nested": { "enabled": true, "path": "C:\\Users\\x", "none": false }
+}

@@ -48,6 +48,7 @@ namespace fastlook::viewer
         std::shared_ptr<PreviewContext const> m_ctx;
         std::shared_ptr<core::TextDocument> m_doc;
         std::shared_ptr<IndexState> m_index;
+        std::shared_ptr<ILineStyler> m_styler;
         std::jthread m_indexThread;
         std::unique_ptr<CodeView> m_view;
         winrt::Microsoft::UI::Xaml::Controls::Primitives::ToggleButton m_wrapButton{nullptr};

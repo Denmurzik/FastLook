@@ -43,6 +43,12 @@
     <TargetName>FastLook.Core</TargetName>
   </PropertyGroup>
 
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>$(RepoRoot)third_party\lexilla\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+    </ClCompile>
+  </ItemDefinitionGroup>
+
   <ItemGroup>
     <ClInclude Include="**\*.h" Exclude="obj\**" />
     <ClCompile Include="**\*.cpp" Exclude="obj\**" />
