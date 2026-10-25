@@ -11,6 +11,9 @@ namespace fastlook::core
     {
         constexpr auto kProgressInterval = std::chrono::milliseconds(100);
         constexpr unsigned kDeadlineCheckMask = 63; // clock read every 64 entries
+        // Reparse points are never followed; cloud directories (listing them would populate them) are counted, not entered.
+        constexpr DWORD kNoDescend =
+            FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_RECALL_ON_OPEN | FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS | FILE_ATTRIBUTE_OFFLINE;
 
         // Paths near MAX_PATH need the extended-length prefix.
         std::wstring SearchPattern(std::wstring dir)
@@ -90,7 +93,7 @@ namespace fastlook::core
                 if (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
                 {
                     ++stats.folders;
-                    if (!(data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+                    if (!(data.dwFileAttributes & kNoDescend))
                     {
                         pending.push_back(dir + (dir.ends_with(L'\\') ? L"" : L"\\") + data.cFileName);
                     }

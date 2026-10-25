@@ -2,6 +2,7 @@
 #include "Previewers/Common/ShellInfo.h"
 
 #include <robuffer.h>
+#include <commoncontrols.h>
 #include <shlobj.h>
 
 #include <algorithm>
@@ -157,23 +158,82 @@ namespace fastlook::viewer
             return nullptr;
         }
 
-        UniqueHbitmap GetShellImage(std::wstring const& path, int sizePx, bool cacheOnly)
+        // Extension-based icon: SHGFI_USEFILEATTRIBUTES means the shell never touches the file, so no handler can open (and
+        // hydrate) it. Rendered into a 32-bit DIB.
+        UniqueHbitmap IconFromAttributes(std::wstring const& path, int sizePx)
         {
+            DWORD attributes = GetFileAttributesW(path.c_str());
+            if (attributes == INVALID_FILE_ATTRIBUTES)
+            {
+                attributes = FILE_ATTRIBUTE_NORMAL;
+            }
+            SHFILEINFOW info{};
+            if (!SHGetFileInfoW(path.c_str(), attributes, &info, sizeof(info), SHGFI_SYSICONINDEX | SHGFI_USEFILEATTRIBUTES))
+            {
+                return nullptr;
+            }
+            int const list = sizePx > 96 ? SHIL_JUMBO : sizePx > 32 ? SHIL_EXTRALARGE : SHIL_LARGE;
+            winrt::com_ptr<IImageList> images;
+            if (FAILED(SHGetImageList(list, IID_PPV_ARGS(images.put()))))
+            {
+                return nullptr;
+            }
+            HICON icon = nullptr;
+            if (FAILED(images->GetIcon(info.iIcon, ILD_TRANSPARENT, &icon)) || icon == nullptr)
+            {
+                return nullptr;
+            }
+            int width = 0;
+            int height = 0;
+            ICONINFO iconInfo{};
+            if (GetIconInfo(icon, &iconInfo))
+            {
+                BITMAP colorInfo{};
+                GetObjectW(iconInfo.hbmColor, sizeof(colorInfo), &colorInfo);
+                width = colorInfo.bmWidth;
+                height = colorInfo.bmHeight;
+                DeleteObject(iconInfo.hbmColor);
+                DeleteObject(iconInfo.hbmMask);
+            }
+            if (width <= 0 || height <= 0)
+            {
+                DestroyIcon(icon);
+                return nullptr;
+            }
+
+            BITMAPINFO header{};
+            header.bmiHeader.biSize = sizeof(header.bmiHeader);
+            header.bmiHeader.biWidth = width;
+            header.bmiHeader.biHeight = -height;
+            header.bmiHeader.biPlanes = 1;
+            header.bmiHeader.biBitCount = 32;
+            header.bmiHeader.biCompression = BI_RGB;
+            void* bits = nullptr;
+            HBITMAP const dib = CreateDIBSection(nullptr, &header, DIB_RGB_COLORS, &bits, nullptr, 0);
+            if (dib != nullptr)
+            {
+                HDC const dc = CreateCompatibleDC(nullptr);
+                HGDIOBJ const old = SelectObject(dc, dib);
+                DrawIconEx(dc, 0, 0, icon, width, height, 0, nullptr, DI_NORMAL);
+                SelectObject(dc, old);
+                DeleteDC(dc);
+            }
+            DestroyIcon(icon);
+            return UniqueHbitmap{dib};
+        }
+
+        UniqueHbitmap GetShellImage(std::wstring const& path, int sizePx, bool iconOnly)
+        {
+            if (iconOnly)
+            {
+                return IconFromAttributes(path, sizePx);
+            }
             winrt::com_ptr<IShellItemImageFactory> factory;
             if (FAILED(SHCreateItemFromParsingName(path.c_str(), nullptr, IID_PPV_ARGS(factory.put()))))
             {
                 return nullptr;
             }
             SIZE const size{sizePx, sizePx};
-            if (cacheOnly)
-            {
-                // INCACHEONLY returns what is already cached; on a miss only the icon (no handler, no content read) is used.
-                if (auto cached = RequestImage(*factory, size, SIIGBF_BIGGERSIZEOK | SIIGBF_INCACHEONLY))
-                {
-                    return cached;
-                }
-                return RequestImage(*factory, size, SIIGBF_BIGGERSIZEOK | SIIGBF_ICONONLY);
-            }
             if (auto image = RequestImage(*factory, size, SIIGBF_BIGGERSIZEOK))
             {
                 return image;
@@ -191,7 +251,7 @@ namespace fastlook::viewer
         return QueryPathInfo(item.path);
     }
 
-    winrt::Windows::Foundation::IAsyncOperation<ImageSource> LoadThumbnailAsync(core::ipc::Item item, int sizePx, bool cacheOnly)
+    winrt::Windows::Foundation::IAsyncOperation<ImageSource> LoadThumbnailAsync(core::ipc::Item item, int sizePx, bool iconOnly)
     {
         auto const ui = winrt::Microsoft::UI::Dispatching::DispatcherQueue::GetForCurrentThread();
         if (!ui)
@@ -205,7 +265,7 @@ namespace fastlook::viewer
         int height = 0;
         std::vector<uint8_t> pixels;
         {
-            auto const bitmap = GetShellImage(item.path, std::max(sizePx, 16), cacheOnly);
+            auto const bitmap = GetShellImage(item.path, std::max(sizePx, 16), iconOnly);
             if (!bitmap || !ReadPixels(bitmap.get(), width, height, pixels))
             {
                 pixels.clear();
@@ -232,6 +292,26 @@ namespace fastlook::viewer
         if (FAILED(StrFormatByteSizeEx(bytes, SFBS_FLAGS_ROUND_TO_NEAREST_DISPLAYED_DIGIT, text, ARRAYSIZE(text))))
         {
             return std::to_wstring(bytes);
+        }
+        return text;
+    }
+
+    std::wstring FormatNumber(uint64_t value)
+    {
+        std::wstring const digits = std::to_wstring(value);
+        wchar_t text[64]{};
+        if (GetNumberFormatEx(LOCALE_NAME_USER_DEFAULT, 0, digits.c_str(), nullptr, text, ARRAYSIZE(text)) == 0)
+        {
+            return digits;
+        }
+        // The default format carries the locale's decimals (e.g. ",00"); an integer needs none.
+        wchar_t separator[8]{};
+        if (GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, LOCALE_SDECIMAL, separator, ARRAYSIZE(separator)) != 0)
+        {
+            if (wchar_t* at = wcsstr(text, separator))
+            {
+                *at = 0;
+            }
         }
         return text;
     }

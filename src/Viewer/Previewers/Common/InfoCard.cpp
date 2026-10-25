@@ -13,30 +13,15 @@ namespace fastlook::viewer
     {
         using namespace winrt::Microsoft::UI::Xaml;
         using namespace winrt::Microsoft::UI::Xaml::Controls;
-        using winrt::Microsoft::UI::Xaml::Media::Brush;
-
-        Brush ThemeBrush(wchar_t const* key)
-        {
-            try
-            {
-                return Application::Current().Resources().Lookup(winrt::box_value(key)).as<Brush>();
-            }
-            catch (winrt::hresult_error const&)
-            {
-                return nullptr;
-            }
-        }
-
-        TextBlock MakeText(winrt::hstring const& text, double size, wchar_t const* brushKey)
+        
+        TextBlock MakeText(winrt::hstring const& text, double size, double opacity)
         {
             TextBlock block;
             block.Text(text);
             block.FontSize(size);
             block.TextWrapping(TextWrapping::Wrap);
-            if (auto brush = ThemeBrush(brushKey))
-            {
-                block.Foreground(brush);
-            }
+            // Dimming by opacity keeps the theme's own text colour (theme brushes cannot be looked up without an element).
+            block.Opacity(opacity);
             return block;
         }
     }
@@ -89,7 +74,7 @@ namespace fastlook::viewer
             root.Children().Append(image);
         }
 
-        TextBlock title = MakeText(model.title, 20, L"TextFillColorPrimaryBrush");
+        TextBlock title = MakeText(model.title, 20, 1.0);
         title.FontWeight(winrt::Windows::UI::Text::FontWeights::SemiBold());
         title.TextAlignment(TextAlignment::Center);
         title.IsTextSelectionEnabled(true);
@@ -99,7 +84,7 @@ namespace fastlook::viewer
 
         if (!model.message.empty())
         {
-            TextBlock message = MakeText(model.message, 14, L"TextFillColorSecondaryBrush");
+            TextBlock message = MakeText(model.message, 14, 0.7);
             message.TextAlignment(TextAlignment::Center);
             root.Children().Append(message);
         }
@@ -124,13 +109,13 @@ namespace fastlook::viewer
                 definition.Height(GridLengthHelper::Auto());
                 grid.RowDefinitions().Append(definition);
 
-                TextBlock label = MakeText(row.label, 13, L"TextFillColorSecondaryBrush");
+                TextBlock label = MakeText(row.label, 13, 0.7);
                 label.HorizontalAlignment(HorizontalAlignment::Right);
                 Grid::SetRow(label, rowIndex);
                 Grid::SetColumn(label, 0);
                 grid.Children().Append(label);
 
-                TextBlock value = MakeText(row.value, 13, L"TextFillColorPrimaryBrush");
+                TextBlock value = MakeText(row.value, 13, 1.0);
                 value.IsTextSelectionEnabled(true);
                 value.MaxWidth(380);
                 Grid::SetRow(value, rowIndex);

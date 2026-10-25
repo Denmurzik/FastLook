@@ -2,8 +2,10 @@
 #include "Previewers/Factories.h"
 
 #include <chrono>
+#include <filesystem>
 #include <stop_token>
 
+#include "Common/Plural.h"
 #include "Diagnostics/Log.h"
 #include "Fs/FolderStats.h"
 #include "Previewers/Common/InfoCard.h"
@@ -50,7 +52,12 @@ namespace fastlook::viewer
                 model.image = image;
                 model.imageSizeDip = kIconDip;
                 model.title = winrt::hstring{info.displayName};
-                model.rows.push_back({Str(L"Fallback", L"Path"), winrt::hstring{item.ref.path}});
+                if (!item.ref.isVirtual)
+                {
+                    // The parent: the folder's own name is the title.
+                    auto const parent = std::filesystem::path{item.ref.path}.parent_path();
+                    model.rows.push_back({Str(L"Fallback", L"Path"), winrt::hstring{(parent.empty() ? std::filesystem::path{item.ref.path} : parent).wstring()}});
+                }
                 AddShellRows(model, info, false);
                 m_countable = !item.ref.isVirtual;
                 if (m_countable)
@@ -114,8 +121,38 @@ namespace fastlook::viewer
 
             void StartCount()
             {
+                m_stop.request_stop(); // a count started by an earlier View() must not keep running
                 m_stop = std::stop_source{};
                 CountAsync(weak_from_this(), m_path, m_stop.get_token(), m_ui);
+            }
+
+            // "<n> <noun>" with the noun form (and, when truncated, the "more than" wording) from Fallback.resw.
+            static std::wstring Counted(wchar_t const* noun, uint64_t n, bool moreThan)
+            {
+                bool const russian = Str(L"Fallback", L"PluralRule") == L"ru";
+                auto const form = russian ? core::PluralRu(n) : core::PluralEn(n);
+                wchar_t const* suffix = L"Other";
+                switch (form)
+                {
+                case core::PluralForm::One:
+                    suffix = L"One";
+                    break;
+                case core::PluralForm::Few:
+                    suffix = L"Few";
+                    break;
+                case core::PluralForm::Many:
+                    suffix = L"Many";
+                    break;
+                case core::PluralForm::Other:
+                    break;
+                }
+                std::wstring key = noun;
+                if (moreThan)
+                {
+                    key += L"More";
+                }
+                key += suffix;
+                return FormatPattern(Str(L"Fallback", key), {FormatNumber(n)});
             }
 
             // UI thread.
@@ -125,15 +162,12 @@ namespace fastlook::viewer
                 {
                     return;
                 }
-                std::wstring text = FormatPattern(Str(L"Fallback", L"Items"), {std::to_wstring(stats.files), std::to_wstring(stats.folders)});
-                text += L", " + FormatBytes(stats.bytes);
+                bool const more = final && stats.truncated;
+                std::wstring text = Counted(L"Files", stats.files, more) + L", " + Counted(L"Folders", stats.folders, more) + L", " +
+                                    FormatBytes(stats.bytes);
                 if (!final)
                 {
                     text += L" …";
-                }
-                else if (stats.truncated)
-                {
-                    text = FormatPattern(Str(L"Fallback", L"MoreThan"), {text});
                 }
                 m_contents.Text(winrt::hstring{text});
             }

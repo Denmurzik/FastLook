@@ -30,14 +30,8 @@
   <data name="GetCodec" xml:space="preserve">
     <value>Установить кодек из Microsoft Store</value>
   </data>
-  <data name="Items" xml:space="preserve">
-    <value>{0} файлов, {1} папок</value>
-  </data>
   <data name="Modified" xml:space="preserve">
     <value>Изменён</value>
-  </data>
-  <data name="MoreThan" xml:space="preserve">
-    <value>более {0}</value>
   </data>
   <data name="Path" xml:space="preserve">
     <value>Расположение</value>
@@ -47,5 +41,44 @@
   </data>
   <data name="Type" xml:space="preserve">
     <value>Тип</value>
+  </data>
+  <data name="FilesFew" xml:space="preserve">
+    <value>{0} файла</value>
+  </data>
+  <data name="FilesMany" xml:space="preserve">
+    <value>{0} файлов</value>
+  </data>
+  <data name="FilesMoreFew" xml:space="preserve">
+    <value>более {0} файлов</value>
+  </data>
+  <data name="FilesMoreMany" xml:space="preserve">
+    <value>более {0} файлов</value>
+  </data>
+  <data name="FilesMoreOne" xml:space="preserve">
+    <value>более {0} файла</value>
+  </data>
+  <data name="FilesOne" xml:space="preserve">
+    <value>{0} файл</value>
+  </data>
+  <data name="FoldersFew" xml:space="preserve">
+    <value>{0} папки</value>
+  </data>
+  <data name="FoldersMany" xml:space="preserve">
+    <value>{0} папок</value>
+  </data>
+  <data name="FoldersMoreFew" xml:space="preserve">
+    <value>более {0} папок</value>
+  </data>
+  <data name="FoldersMoreMany" xml:space="preserve">
+    <value>более {0} папок</value>
+  </data>
+  <data name="FoldersMoreOne" xml:space="preserve">
+    <value>более {0} папки</value>
+  </data>
+  <data name="FoldersOne" xml:space="preserve">
+    <value>{0} папка</value>
+  </data>
+  <data name="PluralRule" xml:space="preserve">
+    <value>ru</value>
   </data>
 </root>

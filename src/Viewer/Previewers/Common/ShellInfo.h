@@ -25,14 +25,17 @@ namespace fastlook::viewer
     // GetFileAttributesEx data plus the type name from SHGetFileInfo(SHGFI_USEFILEATTRIBUTES); no property store, no content.
     ShellInfo QueryShellInfo(core::ipc::Item const& item, bool cloudPlaceholder);
 
-    // Call on the UI thread (the result is a XAML object); completes on it. IShellItemImageFactory. cacheOnly asks for
-    // SIIGBF_INCACHEONLY and on a miss falls back to SIIGBF_ICONONLY, which never reads the content (decision 56: a cloud
-    // placeholder is never hydrated). Null when the shell has no image.
+    // Call on the UI thread (the result is a XAML object); completes on it. Default: IShellItemImageFactory (thumbnail, else
+    // icon). iconOnly (required for cloud placeholders, decision 56) never goes through the factory, whose icon handlers may
+    // open the file: the icon comes from SHGetFileInfo(SHGFI_USEFILEATTRIBUTES) and the system image list, i.e. from the name
+    // and attributes alone. Null when there is no image.
     winrt::Windows::Foundation::IAsyncOperation<winrt::Microsoft::UI::Xaml::Media::ImageSource> LoadThumbnailAsync(
-        core::ipc::Item item, int sizePx, bool cacheOnly);
+        core::ipc::Item item, int sizePx, bool iconOnly);
 
     // User-locale formatting.
     std::wstring FormatBytes(uint64_t bytes);
+    // Integer with the user locale's digit grouping.
+    std::wstring FormatNumber(uint64_t value);
     std::wstring FormatDate(FILETIME time);
     // "R H S A": the letters of the attributes that are set; empty when none.
     std::wstring FormatAttributes(DWORD attributes);

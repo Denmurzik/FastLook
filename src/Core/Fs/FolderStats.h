@@ -16,8 +16,8 @@ namespace fastlook::core
         bool truncated = false;
     };
 
-    // Recursive count below `root` (the root itself is not counted). Reparse points are counted and never followed
-    // (a directory reparse point counts as one folder). Unreadable subfolders are skipped. Stops with truncated == true
+    // Recursive count below `root` (the root itself is not counted). Reparse points and cloud directories (recall attributes) are counted and never entered
+    // (each counts as one folder). Unreadable subfolders are skipped. Stops with truncated == true
     // when `stop` is requested or `deadline` passes. `progress` runs on the calling thread, at most every 100 ms, and once
     // more with the final value.
     FolderStats CountFolder(std::filesystem::path const& root, std::stop_token stop, std::chrono::steady_clock::time_point deadline,
