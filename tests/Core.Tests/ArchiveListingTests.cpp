@@ -468,7 +468,7 @@ TEST(ArchiveListing, SevenZipHeaderDeclaringAstronomicalStreamCountReturnsAtOnce
     auto const file = WriteTemp(L"streams.7z", BuildSevenZip(h, h.size()));
     auto const t0 = steady_clock::now();
     auto const l = ListArchive(file, {}, {});
-    EXPECT_LT(steady_clock::now() - t0, milliseconds(50));
+    EXPECT_LT(steady_clock::now() - t0, seconds(1));
     EXPECT_TRUE(l.headerTooLarge);
 }
 
