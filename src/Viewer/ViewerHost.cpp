@@ -51,6 +51,10 @@ namespace fastlook::viewer
         }
         core::log::SetLevel(m_settings.logLevel);
         ApplyTheme();
+        if (m_session)
+        {
+            m_session->InvalidatePreload(); // neighbours were prepared with the previous settings and theme
+        }
     }
 
     void ViewerHost::ApplyTheme()

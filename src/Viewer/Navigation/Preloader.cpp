@@ -66,6 +66,7 @@ namespace fastlook::viewer
         bool completed = false; // PrepareAsync is over (or there was nothing to prepare)
         bool usable = false;    // completed successfully and not retired
         bool retired = false;
+        bool adopted = false;   // Take() handed the running PrepareAsync to the session: this entry only observes its end
     };
 
     Preloader::Preloader() = default;
@@ -117,25 +118,31 @@ namespace fastlook::viewer
         }
     }
 
-    std::shared_ptr<IPreviewer> Preloader::Take(core::ipc::Item const& item, PreviewItem* itemOut)
+    std::optional<Preloader::Taken> Preloader::Take(core::ipc::Item const& item)
     {
         auto const it = std::ranges::find_if(m_entries, [&](auto const& entry) { return SamePath(entry->ref.path, item.path); });
         if (it == m_entries.end())
         {
-            return nullptr;
+            return std::nullopt;
         }
         auto entry = std::move(*it);
         m_entries.erase(it);
-        if (!entry->usable)
+        if (entry->usable)
         {
-            Retire(entry); // still preparing, failed or unsuitable
-            return nullptr;
+            return Taken{std::move(entry->previewer), entry->item, nullptr};
         }
-        if (itemOut)
+        if (!entry->completed && !entry->retired && entry->previewer && entry->action)
         {
-            *itemOut = entry->item;
+            entry->adopted = true;
+            return Taken{entry->previewer, entry->item, Await(entry->action)};
         }
-        return std::move(entry->previewer);
+        Retire(entry); // failed, unsuitable or still classifying
+        return std::nullopt;
+    }
+
+    winrt::Windows::Foundation::IAsyncAction Preloader::Await(winrt::Windows::Foundation::IAsyncAction inner)
+    {
+        co_await inner; // cancelling this action cancels `inner`; a failure of `inner` rethrows here
     }
 
     void Preloader::Clear()
@@ -184,6 +191,11 @@ namespace fastlook::viewer
     void Preloader::OnCompleted(std::shared_ptr<Entry> const& entry)
     {
         entry->completed = true;
+        if (entry->adopted)
+        {
+            entry->action = nullptr; // the session owns the previewer and unloads it
+            return;
+        }
         bool failed = false;
         try
         {

@@ -12,8 +12,8 @@
 namespace fastlook::viewer
 {
     // Keeps the Explorer selection on the item the Viewer shows (folder navigation only). Sync() returns at once; one background
-    // thread owns a ShellWorker and runs only the latest pending request (latest wins) with the 500 ms selection-sync timeout.
-    // The result is ignored.
+    // thread (started by the first Sync) owns a ShellWorker and runs only the latest pending request (latest wins) with the
+    // 500 ms selection-sync timeout. The result is ignored.
     class SelectionSync
     {
     public:
@@ -37,6 +37,6 @@ namespace fastlook::viewer
         std::mutex m_mutex;
         std::condition_variable_any m_wake;
         std::optional<Request> m_pending;
-        std::jthread m_thread; // last: starts in the constructor body, joined first
+        std::jthread m_thread; // last: joined first; started lazily under m_mutex
     };
 }

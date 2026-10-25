@@ -31,6 +31,7 @@ namespace winrt::FastLook::implementation
         void ClearContent();
         // Window title, title-bar name and counter ("i / n", hidden for one item) and the shell icon of `path`.
         void SetItem(std::wstring const& path, hstring const& name, size_t index, size_t count);
+        void SetTitle(hstring const& name);
         void SetCounter(size_t index, size_t count);
         void SetToolbar(std::vector<Microsoft::UI::Xaml::UIElement> const& items);
         void SetTheme(Microsoft::UI::Xaml::ElementTheme theme);

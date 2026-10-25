@@ -45,6 +45,10 @@ namespace fastlook::viewer
                                  static_cast<uint32_t>(std::ceil(ctx->maxContentDip.Height * ctx->scale))};
 
         bool const svg = IsSvg(m_path);
+        if (ctx->prefetch && svg)
+        {
+            throw PreviewError{}; // only still images are prefetched (memory budget)
+        }
         auto wic = WicFactory(); // taken on the UI thread, see DecodeToSize
         winrt::com_ptr<ID2D1Device5> d2d;
         if (svg)
@@ -62,6 +66,10 @@ namespace fastlook::viewer
         else
         {
             animation = AnimatedImage::Open(m_path, wic, stop.get_token()); // null: still image (or a canvas over 4096x4096: first frame)
+            if (ctx->prefetch && animation)
+            {
+                throw PreviewError{};
+            }
             if (!animation)
             {
                 decoded = DecodeToSize(m_path, target, stop.get_token(), std::move(wic));

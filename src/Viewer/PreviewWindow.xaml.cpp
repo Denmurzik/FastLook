@@ -155,6 +155,12 @@ namespace winrt::FastLook::implementation
         m_titleBar->SetIconFor(path);
     }
 
+    void PreviewWindow::SetTitle(hstring const& name)
+    {
+        Title(name);
+        m_titleBar->SetName(name);
+    }
+
     void PreviewWindow::SetCounter(size_t index, size_t count)
     {
         m_titleBar->SetCounter(index, count);

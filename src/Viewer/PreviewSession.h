@@ -35,6 +35,8 @@ namespace fastlook::viewer
         void UpdateItems(core::ipc::ItemsPayload const& payload);
         void Navigate(int delta);
         void Hide();
+        // Drops the prepared neighbours (their context is stale) and prepares them again when a preview is shown.
+        void InvalidatePreload();
         bool IsVisible() const { return m_visible; }
 
         void Zoom(ZoomCommand command);
@@ -89,8 +91,13 @@ namespace fastlook::viewer
         struct WaitForPrepare;
 
         void StartRequest(bool fromNavigation);
-        // Attaches the neighbour the preloader has prepared for req (View() starts its playback). False: nothing usable, take the normal path.
-        bool TryAttachPreloaded(std::shared_ptr<Request> const& req);
+        enum class Preloaded
+        {
+            None,     // nothing usable: take the normal path
+            Attached, // the prepared neighbour is shown (View() starts its playback)
+            Pending   // adopted a neighbour whose PrepareAsync is still running: req->run is watched, the caller awaits it
+        };
+        Preloaded TryAttachPreloaded(std::shared_ptr<Request> const& req);
         // Prefetches index +-1 (the direction of the last navigation first); only while the content of the current item is shown.
         void SchedulePrefetch();
         // Virtual items (e.g. This PC) show the shell display name instead of the ::{CLSID} path.
@@ -102,6 +109,7 @@ namespace fastlook::viewer
         bool IsCurrent(std::shared_ptr<Request> const& req) const;
         void CancelCurrent();
         void StartPrepare(std::shared_ptr<PrepareRun> const& run, PreviewItem item, std::shared_ptr<PreviewContext const> ctx);
+        void WatchRun(std::shared_ptr<PrepareRun> const& run); // run->action is set
         void OnPrepareCompleted(std::shared_ptr<PrepareRun> const& run);
         void Retire(std::shared_ptr<PrepareRun> const& run);
         void Attach(std::shared_ptr<Request> const& req, std::shared_ptr<PrepareRun> const& run, winrt::Microsoft::UI::Xaml::UIElement const& view,
@@ -115,7 +123,18 @@ namespace fastlook::viewer
         void FitWindowImpl(bool force);
         void WatchFirstFrame();
 
+        // What the context of a prefetched neighbour depends on besides the settings (see InvalidatePreload).
+        struct PreloadKey
+        {
+            core::RectI work;
+            double scale = 1.0;
+            bool dark = false;
+            bool operator==(PreloadKey const&) const = default;
+        };
+        PreloadKey CurrentPreloadKey() const;
+
         winrt::Microsoft::UI::Dispatching::DispatcherQueue m_ui{nullptr};
+        PreloadKey m_preloadKey;
 
         std::vector<core::ipc::Item> m_items;
         size_t m_index = 0;

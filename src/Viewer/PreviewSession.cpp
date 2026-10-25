@@ -375,9 +375,49 @@ namespace fastlook::viewer
         // A fire_and_forget coroutine terminates the process on an escaping exception: nothing may leave this try block.
         try
         {
-            if (TryAttachPreloaded(req))
+            auto const preloaded = TryAttachPreloaded(req);
+            if (preloaded == Preloaded::Attached)
             {
                 co_return;
+            }
+            if (preloaded == Preloaded::Pending)
+            {
+                auto const run = req->run;
+                co_await WaitForPrepare{this, run};
+                if (!IsCurrent(req))
+                {
+                    co_return;
+                }
+                bool attached = false;
+                if (run->timedOut)
+                {
+                    Retire(run);
+                }
+                else
+                {
+                    try
+                    {
+                        run->action.GetResults();
+                        Attach(req, run, run->previewer->View(), KindName(req->item.kind));
+                        attached = true;
+                    }
+                    catch (...)
+                    {
+                        try
+                        {
+                            run->previewer->Unload();
+                        }
+                        catch (...)
+                        {
+                        }
+                    }
+                }
+                req->run = nullptr;
+                if (attached)
+                {
+                    co_return;
+                }
+                // The preloaded preparation failed: take the normal path (which shows the failure ladder).
             }
             co_await winrt::resume_background();
             Classified classified;
@@ -508,27 +548,50 @@ namespace fastlook::viewer
         }
     }
 
-    bool PreviewSession::TryAttachPreloaded(std::shared_ptr<Request> const& req)
+    PreviewSession::Preloaded PreviewSession::TryAttachPreloaded(std::shared_ptr<Request> const& req)
     {
-        PreviewItem item;
-        auto previewer = m_preloader.Take(req->ref, &item);
-        if (!previewer)
+        if (CurrentPreloadKey() != m_preloadKey)
         {
-            return false;
+            m_preloader.Clear(); // monitor, DPI or theme changed since the neighbours were prepared
+            return Preloaded::None;
         }
+        auto taken = m_preloader.Take(req->ref);
+        if (!taken)
+        {
+            return Preloaded::None;
+        }
+        auto const& previewer = taken->previewer;
         try
         {
-            req->item = item;
-            m_shownItem = item;
+            req->item = taken->item;
+            m_shownItem = taken->item;
             auto run = std::make_shared<PrepareRun>();
             run->previewer = previewer;
+            if (taken->pending)
+            {
+                run->action = taken->pending;
+                req->run = run;
+                WatchRun(run);
+                return Preloaded::Pending;
+            }
             run->completed = true; // PrepareAsync finished in the preloader
-            Attach(req, run, previewer->View(), KindName(item.kind));
-            return true;
+            Attach(req, run, previewer->View(), KindName(taken->item.kind));
+            return Preloaded::Attached;
         }
         catch (...)
         {
             FL_LOG_INFO(L"Attaching a preloaded previewer failed");
+            req->run = nullptr;
+            if (taken->pending)
+            {
+                try
+                {
+                    taken->pending.Cancel();
+                }
+                catch (...)
+                {
+                }
+            }
             try
             {
                 previewer->Unload();
@@ -536,15 +599,32 @@ namespace fastlook::viewer
             catch (...)
             {
             }
-            return false;
+            return Preloaded::None;
         }
+    }
+
+    PreviewSession::PreloadKey PreviewSession::CurrentPreloadKey() const
+    {
+        auto const monitor = ResolveMonitor(true);
+        return {monitor.work, monitor.scale, ViewerHost::Get().Dark()};
+    }
+
+    void PreviewSession::InvalidatePreload()
+    {
+        m_preloader.Clear();
+        SchedulePrefetch();
     }
 
     void PreviewSession::SchedulePrefetch()
     {
-        if (!m_visible || !m_attached || m_current || m_items.empty())
+        if (!m_visible || m_current || m_items.empty())
         {
             return;
+        }
+        if (auto const key = CurrentPreloadKey(); key != m_preloadKey)
+        {
+            m_preloader.Clear();
+            m_preloadKey = key;
         }
         std::vector<core::ipc::Item> neighbours;
         for (int const delta : {m_lastDelta, -m_lastDelta})
@@ -576,7 +656,7 @@ namespace fastlook::viewer
             }
             if (m_visible && !m_items.empty() && SamePath(m_items[m_index].path, ref.path))
             {
-                ViewerHost::Get().Window()->SetItem(ref.path, winrt::hstring{name}, m_index, m_items.size());
+                ViewerHost::Get().Window()->SetTitle(winrt::hstring{name});
             }
         }
         catch (...)
@@ -611,6 +691,7 @@ namespace fastlook::viewer
                 {
                 }
             }
+            SchedulePrefetch(); // the neighbours of a failed item are still worth preparing
         }
         catch (...)
         {
@@ -645,6 +726,11 @@ namespace fastlook::viewer
             run->action = Rethrow(std::current_exception());
         }
 
+        WatchRun(run);
+    }
+
+    void PreviewSession::WatchRun(std::shared_ptr<PrepareRun> const& run)
+    {
         // Weak run: whoever still cares holds it (request, m_retiring); a nobody-cares run needs no completion handling.
         run->action.Completed([weakSelf = weak_from_this(), weakRun = std::weak_ptr<PrepareRun>{run}, ui = m_ui](auto const&, auto) {
             ui.TryEnqueue([weakSelf, weakRun] {

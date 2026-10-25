@@ -13,10 +13,11 @@ namespace fastlook::viewer
         constexpr std::chrono::milliseconds kSelectionSyncTimeout{500};
     }
 
-    SelectionSync::SelectionSync() : m_thread([this](std::stop_token stop) { Loop(stop); }) {}
+    SelectionSync::SelectionSync() = default;
 
     SelectionSync::~SelectionSync()
     {
+        std::lock_guard lock{m_mutex};
         m_thread.request_stop();
         m_wake.notify_all();
     }
@@ -26,6 +27,10 @@ namespace fastlook::viewer
         {
             std::lock_guard lock{m_mutex};
             m_pending = Request{explorer, isDesktop, std::move(item)};
+            if (!m_thread.joinable())
+            {
+                m_thread = std::jthread([this](std::stop_token stop) { Loop(stop); });
+            }
         }
         m_wake.notify_one();
     }
