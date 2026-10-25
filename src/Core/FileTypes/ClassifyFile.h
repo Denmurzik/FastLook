@@ -18,4 +18,8 @@ namespace fastlook::core
     // Reads attributes and at most 4 KB of head (never for cloud placeholders); errors give Fallback.
     // Callers pass item.path / item.isVirtual. The caller has COM initialised (WIC lookup).
     FileClassification ClassifyFile(std::wstring_view path, bool isVirtual, bool useShellHandlers);
+
+    // True when the file's attributes mark it as a cloud placeholder (recall on open / data access, offline): opening it would
+    // download it. Reads attributes only; false when they cannot be read.
+    bool IsCloudPlaceholderPath(std::wstring_view path);
 }

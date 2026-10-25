@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <limits>
+#include <span>
 
 #include <winrt/Windows.UI.h>
 
@@ -13,6 +14,7 @@
 #include "Text/Utf.h"
 #include "Ui/Placement.h"
 #include "Util/Async.h"
+#include "Util/Clipboard.h"
 #include "Util/Str.h"
 
 namespace fastlook::viewer
@@ -21,45 +23,43 @@ namespace fastlook::viewer
     {
         constexpr uint64_t kMaxRenderedBytes = 2ull * 1024 * 1024; // larger files open as source
         constexpr size_t kMaxRenderedBlocks = 4000;                // XAML elements are heavy: bigger documents open as source
+        constexpr size_t kMaxRenderedSpans = 40000;                // one Run/Hyperlink each; keeps the UI-thread build bounded
 
-        size_t CountBlocks(std::vector<core::md::Block> const& blocks)
+        struct Weight
         {
-            size_t n = blocks.size();
+            size_t blocks = 0, spans = 0;
+        };
+
+        void Count(std::vector<core::md::Block> const& blocks, Weight& w)
+        {
+            w.blocks += blocks.size();
             for (auto const& block : blocks)
             {
-                n += CountBlocks(block.children);
+                w.spans += block.spans.size();
+                Count(block.children, w);
             }
-            return n;
         }
 
-        bool SetClipboardText(HWND owner, std::wstring const& text)
+        bool ReadAll(std::filesystem::path const& path, std::vector<uint8_t>& out)
         {
-            if (!OpenClipboard(owner))
+            HANDLE const file = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+            if (file == INVALID_HANDLE_VALUE)
             {
-                FL_LOG_INFO(L"Copying text: OpenClipboard failed, error {}", GetLastError());
                 return false;
             }
-            bool ok = false;
-            if (EmptyClipboard())
+            LARGE_INTEGER size{};
+            bool ok = GetFileSizeEx(file, &size) && static_cast<uint64_t>(size.QuadPart) <= kMaxRenderedBytes;
+            if (ok)
             {
-                size_t const bytes = (text.size() + 1) * sizeof(wchar_t);
-                if (HGLOBAL const memory = GlobalAlloc(GMEM_MOVEABLE, bytes))
-                {
-                    if (void* const data = GlobalLock(memory))
-                    {
-                        memcpy(data, text.c_str(), bytes);
-                        GlobalUnlock(memory);
-                        ok = SetClipboardData(CF_UNICODETEXT, memory) != nullptr;
-                    }
-                    if (!ok)
-                    {
-                        GlobalFree(memory);
-                    }
-                }
+                out.resize(static_cast<size_t>(size.QuadPart));
+                DWORD read = 0;
+                ok = out.empty() || (ReadFile(file, out.data(), static_cast<DWORD>(out.size()), &read, nullptr) && read == out.size());
             }
-            CloseClipboard();
+            CloseHandle(file);
             return ok;
         }
+
     }
 
     MarkdownPreviewer::~MarkdownPreviewer() = default;
@@ -89,31 +89,50 @@ namespace fastlook::viewer
         {
             throw PreviewError{std::wstring{Str(L"Markdown", L"UnsupportedEncoding")}, std::nullopt};
         }
-        doc->BuildIndex(stop.get_token(), [](uint64_t, bool) {});
-        if (cancel())
-        {
-            co_return;
-        }
-        if (doc->Faulted())
-        {
-            throw PreviewError{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
-        }
 
+        // The rendered path never needs the line index: the text is read straight from the file and the index is built when the
+        // source view is first shown.
         core::md::Document parsed;
         bool sourceOnly = doc->SizeBytes() > kMaxRenderedBytes;
         if (!sourceOnly)
         {
-            std::wstring const text = doc->ExtractRange({0, 0}, {(std::numeric_limits<uint64_t>::max)(), 0});
-            if (doc->Faulted())
+            std::vector<uint8_t> bytes;
+            if (!ReadAll(path, bytes))
             {
                 throw PreviewError{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
             }
-            parsed = core::md::Parse(core::ToUtf8(text));
-            sourceOnly = CountBlocks(parsed.blocks) > kMaxRenderedBlocks;
+            auto const info = doc->Encoding();
+            std::span<const uint8_t> body{bytes};
+            body = body.subspan(std::min<size_t>(info.bomLength, body.size()));
+            std::string utf8;
+            if (info.encoding == core::TextEncoding::Utf8)
+            {
+                utf8.assign(reinterpret_cast<char const*>(body.data()), body.size());
+            }
+            else
+            {
+                utf8 = core::ToUtf8(core::DecodeToUtf16(body, info));
+            }
+            parsed = core::md::Parse(utf8);
+            Weight weight;
+            Count(parsed.blocks, weight);
+            sourceOnly = weight.blocks > kMaxRenderedBlocks || weight.spans > kMaxRenderedSpans;
         }
         if (cancel())
         {
             co_return;
+        }
+        if (sourceOnly)
+        {
+            doc->BuildIndex(stop.get_token(), [](uint64_t, bool) {});
+            if (cancel())
+            {
+                co_return;
+            }
+            if (doc->Faulted())
+            {
+                throw PreviewError{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
+            }
         }
 
         m_doc = doc;
@@ -173,6 +192,10 @@ namespace fastlook::viewer
         {
             if (!m_code)
             {
+                if (!m_doc->IndexComplete())
+                {
+                    m_doc->BuildIndex({}, [](uint64_t, bool) {}); // at most 2 MiB here (larger files were indexed in PrepareAsync)
+                }
                 m_code = std::make_unique<CodeView>(m_doc);
                 m_code->SetStyler(m_styler);
                 m_code->SetDark(m_ctx->dark);
@@ -281,6 +304,20 @@ namespace fastlook::viewer
         using winrt::Windows::System::VirtualKey;
         if (!m_source)
         {
+            if (ctrl && !shift && key == VirtualKey::C)
+            {
+                // Selected text of the rendered view; without a selection the window copies the file.
+                if (m_images)
+                {
+                    std::wstring const text{m_images->SelectedText()};
+                    if (!text.empty())
+                    {
+                        SetClipboardText(m_ctx ? m_ctx->hwnd : nullptr, text);
+                        return true;
+                    }
+                }
+                return false;
+            }
             return !ctrl && !shift && ScrollRendered(key);
         }
         if (!m_code)

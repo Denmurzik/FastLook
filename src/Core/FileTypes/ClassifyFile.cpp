@@ -99,4 +99,14 @@ namespace fastlook::core
             result.shellHandlerClsid = std::move(clsid);
         return result;
     }
+
+    bool IsCloudPlaceholderPath(std::wstring_view path)
+    {
+        if (path.empty())
+            return false;
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        if (!GetFileAttributesExW(ExtendedPath(path).c_str(), GetFileExInfoStandard, &data))
+            return false;
+        return (data.dwFileAttributes & kPlaceholderAttributes) != 0;
+    }
 }

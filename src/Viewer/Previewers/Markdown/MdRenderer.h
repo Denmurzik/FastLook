@@ -6,19 +6,23 @@
 #include <vector>
 
 #include <winrt/Microsoft.UI.Xaml.h>
+#include <winrt/Microsoft.UI.Xaml.Controls.h>
 #include <winrt/Microsoft.UI.Xaml.Media.Imaging.h>
 
 #include "Markdown/MdModel.h"
 
 namespace fastlook::viewer
 {
-    // The decoded pictures of a rendered document. UI thread only. Close() releases them (and stops pending loads from attaching
-    // more); the owner calls it from Unload.
+    // Per-document state of a rendered view: the decoded pictures and the text block that holds the current selection. UI thread
+    // only. Close() releases them (and stops pending loads from attaching more); the owner calls it from Unload.
     struct MdImages
     {
         std::vector<winrt::Microsoft::UI::Xaml::Media::Imaging::SoftwareBitmapSource> sources;
+        winrt::Microsoft::UI::Xaml::Controls::RichTextBlock selected{nullptr};
         bool closed = false;
 
+        // The selected text of the block that has a selection, empty when nothing is selected.
+        winrt::hstring SelectedText() const;
         void Close();
     };
 

@@ -9,6 +9,7 @@
 #include <winrt/Windows.UI.Text.h>
 
 #include "Diagnostics/Log.h"
+#include "FileTypes/ClassifyFile.h"
 #include "FileTypes/Extensions.h"
 #include "Previewers/Image/WicDecoder.h"
 #include "Previewers/PreviewContext.h"
@@ -257,6 +258,7 @@ namespace fastlook::viewer
             fs::path baseDir;
             std::vector<ImageJob> jobs;
             bool subdued = false; // inside a quote
+            std::shared_ptr<MdImages> doc; // selection tracking
         };
 
         struct Fmt
@@ -415,11 +417,34 @@ namespace fastlook::viewer
 
         // ---- Blocks -------------------------------------------------------------------------------------------------------
 
+        // Remembers which block holds the selection, so Ctrl+C can copy it.
+        void TrackSelection(RichTextBlock const& block, RenderState const& st)
+        {
+            std::weak_ptr<MdImages> const weak = st.doc;
+            block.SelectionChanged([weak](auto const& sender, auto const&) {
+                auto const doc = weak.lock();
+                if (!doc || doc->closed)
+                {
+                    return;
+                }
+                auto const text = sender.template as<RichTextBlock>();
+                if (!text.SelectedText().empty())
+                {
+                    doc->selected = text;
+                }
+                else if (doc->selected && doc->selected == text)
+                {
+                    doc->selected = nullptr;
+                }
+            });
+        }
+
         RichTextBlock MakeTextBlock(std::vector<Span> const& spans, double size, Fmt base, RenderState& st)
         {
             RichTextBlock text;
             text.TextWrapping(TextWrapping::Wrap);
             text.IsTextSelectionEnabled(true);
+            TrackSelection(text, st);
             text.FontSize(size);
             text.Foreground(Brush(TextColor(st)));
             Paragraph paragraph;
@@ -438,8 +463,11 @@ namespace fastlook::viewer
 
         UIElement BuildList(Block const& list, RenderState& st, int depth)
         {
+            // A loose list (blank lines between items; its items hold paragraphs) gets visibly more room than a tight one.
+            bool const loose = std::any_of(list.children.begin(), list.children.end(),
+                                           [](Block const& item) { return item.spans.empty() && !item.children.empty(); });
             StackPanel panel;
-            panel.Spacing(4);
+            panel.Spacing(loose ? 14 : 4);
             unsigned number = list.start;
             for (Block const& item : list.children)
             {
@@ -629,6 +657,7 @@ namespace fastlook::viewer
             std::wstring_view const text = StripFinalNewline(code.text);
             RichTextBlock block;
             block.IsTextSelectionEnabled(true);
+            TrackSelection(block, st);
             block.TextWrapping(TextWrapping::NoWrap);
             block.FontFamily(MonoFont());
             block.FontSize(13);
@@ -700,6 +729,7 @@ namespace fastlook::viewer
         {
             RichTextBlock block;
             block.IsTextSelectionEnabled(true);
+            TrackSelection(block, st);
             block.TextWrapping(TextWrapping::Wrap);
             block.FontFamily(MonoFont());
             block.FontSize(13);
@@ -822,6 +852,11 @@ namespace fastlook::viewer
                     co_await winrt::resume_background();
                     try
                     {
+                        // Attributes only: a cloud placeholder is never opened (that would download it).
+                        if (core::IsCloudPlaceholderPath(job.path.native()))
+                        {
+                            throw PreviewError{};
+                        }
                         decoded = DecodeToSize(job.path, target, load->stop, load->wic);
                     }
                     catch (PreviewError const&)
@@ -851,7 +886,15 @@ namespace fastlook::viewer
                     }
                     double const width = decoded.bitmap.PixelWidth() / load->scale;
                     winrt::Microsoft::UI::Xaml::Media::Imaging::SoftwareBitmapSource source;
-                    co_await source.SetBitmapAsync(decoded.bitmap);
+                    try
+                    {
+                        co_await source.SetBitmapAsync(decoded.bitmap);
+                    }
+                    catch (...)
+                    {
+                        decoded.bitmap.Close();
+                        throw;
+                    }
                     decoded.bitmap.Close();
                     if (load->stop.stop_requested() || load->images->closed)
                     {
@@ -870,9 +913,15 @@ namespace fastlook::viewer
         }
     }
 
+    winrt::hstring MdImages::SelectedText() const
+    {
+        return selected && !closed ? selected.SelectedText() : winrt::hstring{};
+    }
+
     void MdImages::Close()
     {
         closed = true;
+        selected = nullptr;
         for (auto& source : sources)
         {
             try
@@ -891,6 +940,7 @@ namespace fastlook::viewer
     {
         Palette const& palette = PaletteFor(dark);
         RenderState state;
+        state.doc = std::make_shared<MdImages>();
         state.palette = &palette;
         state.baseDir = baseDir;
 
@@ -915,7 +965,7 @@ namespace fastlook::viewer
             content.Width(std::clamp(available, 120.0, kContentWidth));
         });
 
-        auto holder = std::make_shared<MdImages>();
+        auto const& holder = state.doc;
         if (images)
         {
             *images = holder;
