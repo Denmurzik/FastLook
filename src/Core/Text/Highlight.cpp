@@ -126,6 +126,37 @@ namespace fastlook::core
         };
     }
 
+    Utf8Step NextUtf8Step(std::span<const uint8_t> bytes, size_t i)
+    {
+        uint8_t const lead = bytes[i];
+        if (lead < 0x80) return {1, 1};
+        uint32_t need = 0;
+        uint8_t low = 0x80, high = 0xBF; // range of the second byte
+        if (lead >= 0xC2 && lead <= 0xDF) need = 1;
+        else if (lead >= 0xE0 && lead <= 0xEF)
+        {
+            need = 2;
+            if (lead == 0xE0) low = 0xA0;
+            else if (lead == 0xED) high = 0x9F;
+        }
+        else if (lead >= 0xF0 && lead <= 0xF4)
+        {
+            need = 3;
+            if (lead == 0xF0) low = 0x90;
+            else if (lead == 0xF4) high = 0x8F;
+        }
+        else return {1, 1}; // stray continuation, C0, C1, F5..FF
+        uint32_t length = 1;
+        for (; length <= need; ++length)
+        {
+            if (i + length >= bytes.size()) return {length, 1}; // truncated
+            uint8_t const b = bytes[i + length];
+            uint8_t const lo = length == 1 ? low : 0x80, hi = length == 1 ? high : 0xBF;
+            if (b < lo || b > hi) return {length, 1};
+        }
+        return {length, length == 4 ? 2u : 1u};
+    }
+
     TokenCategory CategoryFromTags(std::string_view tags)
     {
         if (HasWord(tags, "comment")) return TokenCategory::Comment;

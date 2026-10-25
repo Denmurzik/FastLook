@@ -16,6 +16,15 @@ namespace fastlook::core
     // "identifier", "error" among the space-separated Lexilla style tags; Default when none applies.
     TokenCategory CategoryFromTags(std::string_view tags);
 
+    // One step through UTF-8 the way MultiByteToWideChar decodes it: `length` bytes become `units` UTF-16 units. Valid sequences
+    // are 1-4 bytes (4 bytes = a surrogate pair); every maximal invalid subpart (stray, truncated, overlong, surrogate or
+    // out-of-range sequence) is one U+FFFD. Requires i < bytes.size().
+    struct Utf8Step
+    {
+        uint32_t length, units;
+    };
+    Utf8Step NextUtf8Step(std::span<const uint8_t> bytes, size_t i);
+
     struct StyleRun
     {
         uint32_t start = 0, length = 0; // byte offsets
@@ -25,7 +34,7 @@ namespace fastlook::core
     // Non-Default runs of the whole buffer, ascending and non-overlapping. Empty when the lexer does not exist.
     std::vector<StyleRun> HighlightBuffer(std::string_view bytes, std::string_view lexerName, uint32_t codePage = 65001);
 
-    // Lexes a buffer front to back in steps, keeping the lexer's per-line state between them. `bytes` (at most 20 MiB) must
+    // Lexes a buffer front to back in steps, keeping the lexer's per-line state between them. `bytes` (the viewer caps it at 8 MiB) must
     // outlive the object. LexThrough runs on one thread at a time; LexedThrough and CategoryAt may be read from another thread.
     class IncrementalLexer
     {

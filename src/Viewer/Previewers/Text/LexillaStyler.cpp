@@ -21,7 +21,8 @@ namespace fastlook::viewer
     {
         using core::TokenCategory;
 
-        constexpr uint64_t kMaxStyledBytes = 20ull * 1024 * 1024;
+        constexpr uint64_t kMaxStyledBytes = 8ull * 1024 * 1024;
+        constexpr uint64_t kMaxStyledLines = 500'000; // per-line lexer state is allocated for every line
         constexpr uint64_t kLookAheadRows = 200;
         constexpr size_t kCopyChunk = 4 * 1024 * 1024;
 
@@ -35,21 +36,6 @@ namespace fastlook::viewer
             std::vector<uint8_t> bytes; // a private copy: the mapping may fault, this cannot
             core::IncrementalLexer lexer;
         };
-
-        int Utf8Length(std::span<const uint8_t> bytes, size_t i)
-        {
-            uint8_t const lead = bytes[i];
-            int length = 1;
-            if (lead >= 0xF0 && lead < 0xF8) length = 4;
-            else if (lead >= 0xE0 && lead < 0xF0) length = 3;
-            else if (lead >= 0xC2 && lead < 0xE0) length = 2;
-            if (i + static_cast<size_t>(length) > bytes.size()) return 1;
-            for (int k = 1; k < length; ++k)
-            {
-                if ((bytes[i + static_cast<size_t>(k)] & 0xC0) != 0x80) return 1;
-            }
-            return length;
-        }
 
         class LexillaStyler final : public ILineStyler
         {
@@ -91,8 +77,9 @@ namespace fastlook::viewer
                     uint32_t units = 1;
                     if (utf8)
                     {
-                        length = Utf8Length(bytes, static_cast<size_t>(i));
-                        units = length == 4 ? 2 : 1;
+                        auto const step = core::NextUtf8Step(bytes, static_cast<size_t>(i));
+                        length = static_cast<int>(step.length);
+                        units = step.units;
                     }
                     else if (IsDBCSLeadByteEx(encoding.codePage, bytes[static_cast<size_t>(i)]) && i + 1 < end)
                     {
@@ -166,6 +153,15 @@ namespace fastlook::viewer
                         FL_LOG_INFO(L"Highlighting disabled: the file became unreadable");
                         return nullptr;
                     }
+                }
+                uint64_t lines = 1;
+                for (size_t i = 0; i < copy.size() && lines <= kMaxStyledLines; ++i)
+                {
+                    lines += copy[i] == 0x0A || (copy[i] == 0x0D && !(i + 1 < copy.size() && copy[i + 1] == 0x0A));
+                }
+                if (lines > kMaxStyledLines)
+                {
+                    return nullptr; // too many lines to keep lexer state for
                 }
                 auto lexing = std::make_shared<Lexing>(std::move(copy), m_lexerName, m_doc->Encoding().codePage);
                 return lexing->lexer.Valid() ? lexing : nullptr;

@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "Text/Highlight.h"
+#include "Text/Utf.h"
 
 using namespace fastlook::core;
 
@@ -153,4 +154,26 @@ TEST(Highlight, StopRequestHaltsBetweenSteps)
     source.request_stop();
     lexer.LexThrough(text.size(), source.get_token());
     EXPECT_EQ(lexer.LexedThrough(), 0u);
+}
+
+TEST(Highlight, Utf8StepMatchesMultiByteToWideChar)
+{
+    // Valid, stray/truncated/overlong/surrogate/out-of-range sequences, and 4-byte characters.
+    std::vector<std::string> const samples{
+        "plain", "cafÃ©", "â¬", "ðx", "âx", "âx", "ðx", "ðx",
+        "À", "Á¿", "à", "í ", "ô", "õ", "a",
+        "ÿþ", "abâ", "abð", "â¬â", "ðð"};
+    for (auto const& s : samples)
+    {
+        std::span<const uint8_t> const bytes{reinterpret_cast<const uint8_t*>(s.data()), s.size()};
+        size_t units = 0;
+        for (size_t i = 0; i < bytes.size();)
+        {
+            auto const step = NextUtf8Step(bytes, i);
+            ASSERT_GE(step.length, 1u);
+            i += step.length;
+            units += step.units;
+        }
+        EXPECT_EQ(units, FromUtf8(s).size()) << ::testing::PrintToString(s);
+    }
 }
