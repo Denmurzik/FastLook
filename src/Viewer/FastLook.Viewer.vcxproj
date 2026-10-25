@@ -94,6 +94,9 @@
        with NU1605 until this value is raised. -->
   <PropertyGroup>
     <FastLookWebView2Version>1.0.3719.77</FastLookWebView2Version>
+    <!-- Never copy WebView2Loader.dll next to the exes (no WebView2 in any FastLook process). -->
+    <WebView2NeverCopyLoaderDllToOutputDirectory>true</WebView2NeverCopyLoaderDllToOutputDirectory>
+    <WebView2LoaderPreference>None</WebView2LoaderPreference>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Web.WebView2" Version="$(FastLookWebView2Version)" PrivateAssets="all" />
