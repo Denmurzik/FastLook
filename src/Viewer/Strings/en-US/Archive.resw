@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="utf-8"?>
+<root>
+  <xsd:schema id="root" xmlns="" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:msdata="urn:schemas-microsoft-com:xml-msdata">
+    <xsd:element name="root" msdata:IsDataSet="true" />
+  </xsd:schema>
+  <resheader name="resmimetype">
+    <value>text/microsoft-resx</value>
+  </resheader>
+  <resheader name="version">
+    <value>2.0</value>
+  </resheader>
+  <resheader name="reader">
+    <value>System.Resources.ResXResourceReader, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <resheader name="writer">
+    <value>System.Resources.ResXResourceWriter, System.Windows.Forms, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b77a5c561934e089</value>
+  </resheader>
+  <data name="PluralRule" xml:space="preserve">
+    <value>en</value>
+  </data>
+  <data name="Name" xml:space="preserve">
+    <value>Name</value>
+  </data>
+  <data name="Size" xml:space="preserve">
+    <value>Size</value>
+  </data>
+  <data name="Packed" xml:space="preserve">
+    <value>Packed</value>
+  </data>
+  <data name="Modified" xml:space="preserve">
+    <value>Modified</value>
+  </data>
+  <data name="Summary" xml:space="preserve">
+    <value>{0}, {1}, {2} · Archive: {3}</value>
+  </data>
+  <data name="SummaryNoSize" xml:space="preserve">
+    <value>{0}, {1} · Archive: {2}</value>
+  </data>
+  <data name="FilesOne" xml:space="preserve">
+    <value>{0} file</value>
+  </data>
+  <data name="FilesFew" xml:space="preserve">
+    <value>{0} files</value>
+  </data>
+  <data name="FilesMany" xml:space="preserve">
+    <value>{0} files</value>
+  </data>
+  <data name="FilesOther" xml:space="preserve">
+    <value>{0} files</value>
+  </data>
+  <data name="FoldersOne" xml:space="preserve">
+    <value>{0} folder</value>
+  </data>
+  <data name="FoldersFew" xml:space="preserve">
+    <value>{0} folders</value>
+  </data>
+  <data name="FoldersMany" xml:space="preserve">
+    <value>{0} folders</value>
+  </data>
+  <data name="FoldersOther" xml:space="preserve">
+    <value>{0} folders</value>
+  </data>
+  <data name="TruncatedOne" xml:space="preserve">
+    <value>Showing the first entry</value>
+  </data>
+  <data name="TruncatedFew" xml:space="preserve">
+    <value>Showing first {0} entries</value>
+  </data>
+  <data name="TruncatedMany" xml:space="preserve">
+    <value>Showing first {0} entries</value>
+  </data>
+  <data name="TruncatedOther" xml:space="preserve">
+    <value>Showing first {0} entries</value>
+  </data>
+  <data name="Encrypted" xml:space="preserve">
+    <value>The archive is encrypted</value>
+  </data>
+  <data name="OpenFailed" xml:space="preserve">
+    <value>The archive could not be opened</value>
+  </data>
+</root>
