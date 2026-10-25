@@ -5,7 +5,6 @@
 #include <atomic>
 #include <cmath>
 #include <cwctype>
-#include <format>
 
 #include <winrt/Windows.UI.Text.h>
 
@@ -81,7 +80,14 @@ namespace fastlook::viewer
         {
             auto const total = static_cast<long long>(duration.count() / 1000);
             auto const h = total / 3600, m = (total / 60) % 60, s = total % 60;
-            return h > 0 ? std::format(L"{}:{:02}:{:02}", h, m, s) : std::format(L"{}:{:02}", m, s);
+            wchar_t separator[8] = L":";
+            ::GetLocaleInfoEx(LOCALE_NAME_USER_DEFAULT, LOCALE_STIME, separator, static_cast<int>(std::size(separator)));
+            auto const pad = [](long long value) {
+                auto text = FormatNumber(static_cast<uint64_t>(value));
+                return value < 10 ? FormatNumber(0) + text : text;
+            };
+            std::wstring result = h > 0 ? FormatNumber(static_cast<uint64_t>(h)) + separator + pad(m) : FormatNumber(static_cast<uint64_t>(m));
+            return result + separator + pad(s);
         }
 
         Controls::TextBlock MakeText(std::wstring const& text, double size, bool bold, double opacity)
@@ -114,6 +120,7 @@ namespace fastlook::viewer
 
         PlayerGuard guard;
         bool fileOpened = false;
+        bool notFound = false;
         try
         {
             auto const file = co_await winrt::Windows::Storage::StorageFile::GetFileFromPathAsync(winrt::hstring{path.wstring()});
@@ -124,17 +131,17 @@ namespace fastlook::viewer
             }
             guard.source = winrt::Windows::Media::Core::MediaSource::CreateFromStorageFile(file);
         }
-        catch (winrt::hresult_error const&)
+        catch (winrt::hresult_error const& e)
         {
             if (cancel())
             {
                 co_return;
             }
-            fileOpened = false;
+            notFound = e.code() == HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND) || e.code() == HRESULT_FROM_WIN32(ERROR_PATH_NOT_FOUND);
         }
         if (!fileOpened)
         {
-            throw PreviewError{std::wstring{Str(L"Media", L"Unsupported")}, std::nullopt};
+            throw PreviewError{std::wstring{Str(L"Common", notFound ? L"NotFound" : L"PreviewFailed")}, std::nullopt};
         }
 
         guard.player = MediaPlayer{};
@@ -169,6 +176,11 @@ namespace fastlook::viewer
         auto const width = session.NaturalVideoWidth();
         auto const height = session.NaturalVideoHeight();
         bool const video = width > 0 && height > 0;
+        if (!video && !audioByName)
+        {
+            // A video container whose video codec is missing still opens when its audio decodes.
+            throw PreviewError{std::wstring{Str(L"Media", L"Unsupported")}, std::wstring{core::StoreProductId(core::MissingCodec::Hevc)}};
+        }
         AudioInfo audio;
         if (!video)
         {
@@ -182,7 +194,14 @@ namespace fastlook::viewer
         winrt::Microsoft::UI::Xaml::Media::ImageSource cover{nullptr};
         if (!video)
         {
-            cover = co_await LoadThumbnailAsync(item.ref, kCoverRequestPx, false);
+            try
+            {
+                cover = co_await LoadThumbnailAsync(item.ref, kCoverRequestPx, false);
+            }
+            catch (winrt::hresult_error const&)
+            {
+                FL_LOG_INFO(L"Cover thumbnail failed; showing the audio preview without it");
+            }
             if (cancel() || !co_await ResumeOn(ui))
             {
                 co_return;
@@ -225,7 +244,16 @@ namespace fastlook::viewer
         m_element.Stretch(winrt::Microsoft::UI::Xaml::Media::Stretch::Uniform);
         m_element.SetMediaPlayer(m_player);
 
-        UIElement root = m_element;
+        m_failedToken = m_player.MediaFailed([weak, ui](auto const&, auto const&) {
+            ui.TryEnqueue([weak] {
+                if (auto const strong = weak.lock())
+                {
+                    static_cast<MediaPreviewer&>(*strong).OnMediaFailed();
+                }
+            });
+        });
+
+        UIElement content = m_element;
         if (!m_video)
         {
             Controls::Image image;
@@ -280,14 +308,41 @@ namespace fastlook::viewer
             Controls::Grid::SetRow(m_element, 1);
             grid.Children().Append(header);
             grid.Children().Append(m_element);
-            root = grid;
+            content = grid;
         }
+        m_host = Controls::Grid{};
+        m_host.Children().Append(content);
 
         if (media.autoplayMedia)
         {
             m_player.Play();
         }
-        return root;
+        return m_host;
+    }
+
+    // An error after the open succeeded (a damaged stream, a lost decoder): stop and say so in place of the dead player.
+    void MediaPreviewer::OnMediaFailed()
+    {
+        if (m_unloaded || !m_host || m_failureShown)
+        {
+            return;
+        }
+        m_failureShown = true;
+        try
+        {
+            m_player.Pause();
+        }
+        catch (winrt::hresult_error const&)
+        {
+        }
+        Controls::Border overlay;
+        overlay.Background(winrt::Microsoft::UI::Xaml::Media::SolidColorBrush{
+            m_ctx->dark ? winrt::Windows::UI::Color{0xE6, 0x20, 0x20, 0x20} : winrt::Windows::UI::Color{0xE6, 0xF3, 0xF3, 0xF3}});
+        auto message = MakeText(std::wstring{Str(L"Media", L"Unsupported")}, 16, false, 1.0);
+        message.HorizontalAlignment(HorizontalAlignment::Center);
+        message.VerticalAlignment(VerticalAlignment::Center);
+        overlay.Child(message);
+        m_host.Children().Append(overlay);
     }
 
     void MediaPreviewer::OnVolumeChanged(double volume)
@@ -334,31 +389,49 @@ namespace fastlook::viewer
 
     void MediaPreviewer::CloseMedia()
     {
-        try
-        {
-            if (m_player)
+        // Detach the element first, then close the player, then the source; each step is attempted even if the previous threw.
+        auto const attempt = [](auto&& step) {
+            try
             {
-                m_player.VolumeChanged(m_volumeToken);
-                m_player.Pause();
-                m_player.Source(nullptr);
-                m_player.Close();
+                step();
             }
-            if (m_source)
+            catch (winrt::hresult_error const&)
             {
-                m_source.Close();
+                FL_LOG_INFO(L"Closing the media player failed");
             }
+        };
+        attempt([&] {
             if (m_element)
             {
                 m_element.SetMediaPlayer(nullptr);
             }
-        }
-        catch (winrt::hresult_error const&)
-        {
-            FL_LOG_INFO(L"Closing the media player failed");
-        }
+        });
+        attempt([&] {
+            if (m_player)
+            {
+                m_player.VolumeChanged(m_volumeToken);
+                m_player.MediaFailed(m_failedToken);
+                m_player.Pause();
+                m_player.Source(nullptr);
+            }
+        });
+        attempt([&] {
+            if (m_player)
+            {
+                m_player.Close();
+            }
+        });
+        attempt([&] {
+            if (m_source)
+            {
+                m_source.Close();
+            }
+        });
         m_player = nullptr;
         m_source = nullptr;
         m_element = nullptr;
+        m_host = nullptr;
+        m_failureShown = false;
     }
 
     void MediaPreviewer::Unload()

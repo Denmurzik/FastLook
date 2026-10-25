@@ -29,6 +29,7 @@ namespace fastlook::viewer
     private:
         void OnVolumeChanged(double volume);
         void FlushVolume();
+        void OnMediaFailed();
         void CloseMedia();
 
         std::shared_ptr<PreviewContext const> m_ctx;
@@ -38,6 +39,8 @@ namespace fastlook::viewer
         winrt::Microsoft::UI::Xaml::Media::ImageSource m_cover{nullptr};
         winrt::Microsoft::UI::Dispatching::DispatcherQueueTimer m_volumeTimer{nullptr};
         winrt::event_token m_volumeToken{};
+        winrt::event_token m_failedToken{};
+        winrt::Microsoft::UI::Xaml::Controls::Grid m_host{nullptr};
         AudioInfo m_audio;
         std::wstring m_fileName;
         winrt::Windows::Foundation::Size m_preferred{720, 360};
@@ -45,5 +48,6 @@ namespace fastlook::viewer
         double m_pendingVolume = 0.0;
         bool m_video = false;
         bool m_unloaded = false;
+        bool m_failureShown = false;
     };
 }
