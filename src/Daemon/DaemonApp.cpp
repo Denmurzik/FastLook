@@ -3,10 +3,12 @@
 #include <wtsapi32.h>
 
 #include <filesystem>
+#include <format>
 
 #include "Diagnostics/Log.h"
 #include "Diagnostics/PerfLog.h"
 #include "PeekNotice.h"
+#include "SharedState.h"
 #include "Strings.h"
 #include "System/AppPaths.h"
 
@@ -257,6 +259,7 @@ namespace fastlook::daemon
         switch (msg)
         {
         case WM_FL_TRIGGER:
+            core::perf::Mark("hook_trigger", std::format("qpc_at_hook={}", g_lastTriggerQpc.load()));
             m_controller.OnTrigger(reinterpret_cast<HWND>(wParam));
             return 0;
         case WM_FL_TRAY:
