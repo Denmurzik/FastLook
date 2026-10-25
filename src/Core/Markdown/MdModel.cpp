@@ -2,6 +2,7 @@
 
 #include <md4c.h>
 
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -22,15 +23,15 @@ namespace fastlook::core::md
         // md4c keeps its entity table private; this covers the entities that occur in real documents.
         constexpr NamedEntity kEntities[] = {
             {"amp", L'&'},        {"lt", L'<'},         {"gt", L'>'},         {"quot", L'"'},
-            {"apos", L'\''},      {"nbsp", L' '},  {"copy", L'©'},  {"reg", L'®'},
-            {"trade", L'™'}, {"mdash", L'—'}, {"ndash", L'–'}, {"hellip", L'…'},
-            {"laquo", L'«'}, {"raquo", L'»'}, {"lsquo", L'‘'}, {"rsquo", L'’'},
-            {"ldquo", L'“'}, {"rdquo", L'”'}, {"bull", L'•'},  {"middot", L'·'},
-            {"deg", L'°'},   {"plusmn", L'±'}, {"times", L'×'}, {"divide", L'÷'},
-            {"euro", L'€'},  {"pound", L'£'},  {"yen", L'¥'},   {"cent", L'¢'},
-            {"sect", L'§'},  {"para", L'¶'},   {"larr", L'←'},  {"rarr", L'→'},
-            {"uarr", L'↑'},  {"darr", L'↓'},   {"harr", L'↔'},  {"ne", L'≠'},
-            {"le", L'≤'},    {"ge", L'≥'},     {"infin", L'∞'}, {"check", L'✓'},
+            {"apos", L'\''},      {"nbsp", L'\u00A0'},  {"copy", L'\u00A9'},  {"reg", L'\u00AE'},
+            {"trade", L'\u2122'}, {"mdash", L'\u2014'}, {"ndash", L'\u2013'}, {"hellip", L'\u2026'},
+            {"laquo", L'\u00AB'}, {"raquo", L'\u00BB'}, {"lsquo", L'\u2018'}, {"rsquo", L'\u2019'},
+            {"ldquo", L'\u201C'}, {"rdquo", L'\u201D'}, {"bull", L'\u2022'},  {"middot", L'\u00B7'},
+            {"deg", L'\u00B0'},   {"plusmn", L'\u00B1'}, {"times", L'\u00D7'}, {"divide", L'\u00F7'},
+            {"euro", L'\u20AC'},  {"pound", L'\u00A3'},  {"yen", L'\u00A5'},   {"cent", L'\u00A2'},
+            {"sect", L'\u00A7'},  {"para", L'\u00B6'},   {"larr", L'\u2190'},  {"rarr", L'\u2192'},
+            {"uarr", L'\u2191'},  {"darr", L'\u2193'},   {"harr", L'\u2194'},  {"ne", L'\u2260'},
+            {"le", L'\u2264'},    {"ge", L'\u2265'},     {"infin", L'\u221E'}, {"check", L'\u2713'},
         };
 
         void AppendCodePoint(std::wstring& out, unsigned long cp)
@@ -96,7 +97,7 @@ namespace fastlook::core::md
             switch (type)
             {
             case MD_TEXT_NULLCHAR:
-                out.push_back(L'�');
+                out.push_back(L'\uFFFD');
                 break;
             case MD_TEXT_BR:
                 out.push_back(L'\n');
@@ -295,6 +296,7 @@ namespace fastlook::core::md
                 {
                     Span img;
                     img.flags = CurrentFlags() | static_cast<uint8_t>(SpanFlag::Image);
+                    img.linkHref = CurrentHref();
                     img.href = AttrToWide(static_cast<MD_SPAN_IMG_DETAIL*>(detail)->src);
                     stack_.back().spans.push_back(std::move(img));
                     inImage_ = true;
@@ -330,10 +332,13 @@ namespace fastlook::core::md
                     return 0;
                 }
 
-                if (!canMerge_ || cur.spans.empty())
+                uint8_t flags = CurrentFlags();
+                if (type == MD_TEXT_HTML)
+                    flags |= static_cast<uint8_t>(SpanFlag::RawHtml);
+                if (!canMerge_ || cur.spans.empty() || cur.spans.back().flags != flags)
                 {
                     Span s;
-                    s.flags = CurrentFlags();
+                    s.flags = flags;
                     s.href = CurrentHref();
                     cur.spans.push_back(std::move(s));
                     canMerge_ = true;
@@ -390,6 +395,8 @@ namespace fastlook::core::md
 
     Document Parse(std::string_view utf8)
     {
+        if (utf8.size() > std::numeric_limits<MD_SIZE>::max())
+            return {};
         Builder builder;
         MD_PARSER parser{};
         parser.abi_version = 0;
@@ -401,7 +408,8 @@ namespace fastlook::core::md
         parser.text = [](MD_TEXTTYPE t, const MD_CHAR* s, MD_SIZE n, void* u) {
             return B(u).Text(t, std::string_view(s, n));
         };
-        md_parse(utf8.data(), static_cast<MD_SIZE>(utf8.size()), &parser, &builder);
+        if (md_parse(utf8.data(), static_cast<MD_SIZE>(utf8.size()), &parser, &builder) != 0)
+            return {};
         return builder.Take();
     }
 }

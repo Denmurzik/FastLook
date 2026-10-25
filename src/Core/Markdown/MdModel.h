@@ -16,14 +16,19 @@ namespace fastlook::core::md
         Code = 4,
         Strike = 8,
         Link = 16,
-        Image = 32
+        Image = 32,
+        RawHtml = 64 // inline HTML kept as literal text; render monospace, never interpret
     };
 
     struct Span
     {
         std::wstring text;
         uint8_t flags = 0;
-        std::wstring href; // link target or image src
+        // Link span: href is the link target. Image span: href is the image src and text the alt text.
+        std::wstring href;
+        // Image nested in a link ([![alt](src)](target)): flags are Image|Link, href is src, linkHref is the target.
+        // Empty for every other span.
+        std::wstring linkHref;
         bool operator==(Span const&) const = default;
     };
 
@@ -50,6 +55,9 @@ namespace fastlook::core::md
         Right
     };
 
+    // ListItem shapes: a tight item holds its text directly in `spans` (nested lists/blocks in `children`, after the
+    // spans); a loose item (blank lines between items) has no spans and holds Paragraph blocks in `children`.
+    // Consumers must handle both.
     struct Block
     {
         BlockType type = BlockType::Paragraph;
@@ -70,6 +78,7 @@ namespace fastlook::core::md
         std::vector<Block> blocks;
     };
 
+    // Returns an empty Document on input over 4 GiB or if md4c fails.
     // GitHub dialect (tables, strikethrough, task lists, permissive autolinks). Soft breaks become a space,
     // hard breaks L"\n"; entities are decoded. Nesting deeper than 64 blocks is flattened into the 64th.
     Document Parse(std::string_view utf8);

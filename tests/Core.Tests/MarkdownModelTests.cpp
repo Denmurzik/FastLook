@@ -166,3 +166,49 @@ TEST(MdModel, PathologicalNestingIsBounded)
         ++depth;
     EXPECT_LE(depth, 64);
 }
+
+TEST(MdModel, ImageInsideLinkKeepsBothTargets)
+{
+    auto d = Parse("[![badge](img.svg)](https://target)\n");
+    auto& s = d.blocks[0].spans;
+    ASSERT_EQ(s.size(), 1u);
+    EXPECT_EQ(s[0].flags, static_cast<uint8_t>(F(SpanFlag::Image) | F(SpanFlag::Link)));
+    EXPECT_EQ(s[0].text, L"badge");
+    EXPECT_EQ(s[0].href, L"img.svg");
+    EXPECT_EQ(s[0].linkHref, L"https://target");
+}
+
+TEST(MdModel, LooseListItemsHoldParagraphs)
+{
+    auto d = Parse("- a\n\n- b\n");
+    ASSERT_EQ(d.blocks.size(), 1u);
+    auto& list = d.blocks[0];
+    ASSERT_EQ(list.children.size(), 2u);
+    for (auto& item : list.children)
+    {
+        EXPECT_EQ(item.type, BlockType::ListItem);
+        EXPECT_TRUE(item.spans.empty());
+        ASSERT_EQ(item.children.size(), 1u);
+        EXPECT_EQ(item.children[0].type, BlockType::Paragraph);
+    }
+    EXPECT_EQ(list.children[1].children[0].spans[0].text, L"b");
+}
+
+TEST(MdModel, InlineRawHtmlIsFlaggedLiteral)
+{
+    auto d = Parse("a <b>x</b> c\n");
+    auto& s = d.blocks[0].spans;
+    auto raw = std::ranges::count_if(s, [](auto& x) { return x.flags & F(SpanFlag::RawHtml); });
+    EXPECT_GE(raw, 1);
+    std::wstring all;
+    for (auto& x : s)
+        all += x.text;
+    EXPECT_EQ(all, L"a <b>x</b> c");
+    EXPECT_EQ(s[0].flags, 0);
+}
+
+TEST(MdModel, UnknownEntityStaysLiteral)
+{
+    auto d = Parse("&notanentity; ok\n");
+    EXPECT_EQ(d.blocks[0].spans[0].text, L"&notanentity; ok");
+}
