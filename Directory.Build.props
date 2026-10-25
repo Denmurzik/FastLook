@@ -1,0 +1,10 @@
+<Project>
+  <PropertyGroup>
+    <RepoRoot>$(MSBuildThisFileDirectory)</RepoRoot>
+    <!-- Outputs live under out/ (gitignored) -->
+    <OutDir>$(RepoRoot)out\bin\$(Configuration)\</OutDir>
+    <IntDir>$(RepoRoot)out\obj\$(MSBuildProjectName)\$(Configuration)\</IntDir>
+    <!-- Defined here (not left to the VC targets) so C++/WinRT's XamlMetaDataProvider.{idl,cpp} defaults land in obj, not the source tree -->
+    <GeneratedFilesDir>$(IntDir)Generated Files\</GeneratedFilesDir>
+  </PropertyGroup>
+</Project>

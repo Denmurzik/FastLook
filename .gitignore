@@ -429,3 +429,7 @@ FodyWeavers.xsd
 
 # Local agent scratch
 .superpowers/
+
+# FastLook build output / tools
+out/
+tools/

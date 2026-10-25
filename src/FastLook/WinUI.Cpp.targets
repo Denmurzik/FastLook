@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Minimal stand-in for $(MSBuildExtensionsPath)\Microsoft\WindowsXaml\v18.0\Microsoft.Windows.UI.Xaml.Cpp.targets.
+
+  That file ships with the full Visual Studio IDE / UWP workload and is absent from "Build Tools".
+  The WinUI NuGet package (Microsoft.UI.Xaml.Markup.Compiler.interop.targets) already defines the
+  MarkupCompilePass1/2 targets and the CompileXaml task; the VS file is only the glue that runs them
+  inside a native (vcxproj) build. This file is that glue, nothing more.
+
+  Pass 1 (before MIDL):  XAML -> *.xaml.g.h and friends.
+  Pass 2 (after MIDL + winmd merge, before CL): XAML -> *.xbf, XamlTypeInfo, *.xaml.g.hpp.
+-->
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+
+  <PropertyGroup>
+    <Language>C++</Language>
+    <ManagedAssembly>false</ManagedAssembly>
+    <DefaultLanguageSourceExtension>.cpp</DefaultLanguageSourceExtension>
+    <XamlGeneratedOutputPath>$(GeneratedFilesDir)</XamlGeneratedOutputPath>
+    <IsNativeLanguage>true</IsNativeLanguage>
+    <XamlSavedStateFilePath>$(IntDir)XamlSaveStateFile.xml</XamlSavedStateFilePath>
+
+    <BeforeMidlCompileTargets>$(BeforeMidlCompileTargets);FastLookMarkupCompilePass1</BeforeMidlCompileTargets>
+    <BeforeClCompileTargets>$(BeforeClCompileTargets);FastLookMarkupCompilePass2</BeforeClCompileTargets>
+  </PropertyGroup>
+
+  <Target Name="FastLookMarkupCompilePass1" DependsOnTargets="MarkupCompilePass1" />
+
+  <Target Name="FastLookMarkupCompilePass2" DependsOnTargets="FastLookResolveWinMDs;MarkupCompilePass2">
+    <!-- Pass 2 writes XamlTypeInfo*.g.cpp (type info, and via App.xaml.g.hpp the generated wWinMain). -->
+    <ItemGroup>
+      <ClCompile Remove="$(GeneratedFilesDir)XamlTypeInfo.g.cpp;$(GeneratedFilesDir)XamlTypeInfo.Impl.g.cpp" />
+      <ClCompile Include="$(GeneratedFilesDir)XamlTypeInfo.g.cpp;$(GeneratedFilesDir)XamlTypeInfo.Impl.g.cpp" />
+    </ItemGroup>
+  </Target>
+
+  <!--
+    C++/WinRT tags its generated XamlMetaDataProvider.cpp as a second-iteration ("XamlGenerated") compile that the VS glue
+    builds via CompileXamlGeneratedFiles. A single normal pass is enough here, so fold it into the regular ClCompile batch.
+  -->
+  <Target Name="FastLookFoldXamlGeneratedCompile" AfterTargets="CppWinRTComputeXamlGeneratedCompileInputs">
+    <ItemGroup>
+      <ClCompile Condition="'%(ClCompile.CompilerIteration)' == 'XamlGenerated'">
+        <CompilerIteration></CompilerIteration>
+      </ClCompile>
+    </ItemGroup>
+  </Target>
+
+  <!-- Native equivalent of the "filtered ReferencePath" the VS glue provides to the XAML compiler. -->
+  <Target Name="FastLookResolveWinMDs">
+    <ItemGroup>
+      <WinMDReferenceToCompile Include="@(ReferencePath)" Condition="'%(Extension)' == '.winmd'" />
+    </ItemGroup>
+  </Target>
+
+</Project>
