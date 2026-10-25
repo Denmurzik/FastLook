@@ -1,7 +1,8 @@
 """Writes the PDF fixtures with the standard library only.
 
   python -I tests/fixtures/pdf/make_pdfs.py                       two-pages.pdf, landscape.pdf, encrypted.pdf next to this script
-  python -I tests/fixtures/pdf/make_pdfs.py --pages N OUT.pdf     one N-page portrait document (for memory checks)
+  python -I tests/fixtures/pdf/make_pdfs.py --pages N OUT.pdf [--size W H]
+                                                                  one N-page document, portrait 612x792 unless --size (memory checks)
 
 encrypted.pdf: Standard security handler, V1/R2, RC4-40, user password "x", empty owner password (= user password).
 """
@@ -30,6 +31,9 @@ def rc4(key: bytes, data: bytes) -> bytes:
 
 
 def page_content(title: str, width: int, height: int) -> bytes:
+    if height < 200:  # strip pages (memory/visibility checks): one big title and a bar
+        text = "BT /F1 %d Tf 8 %d Td (%s) Tj ET 0.2 0.4 0.8 rg 0 0 %d 3 re f" % (height * 0.6, height * 0.2, title, width)
+        return text.encode("latin-1")
     lines = [
         "BT /F1 36 Tf 48 %d Td (%s) Tj ET" % (height - 96, title),
         "BT /F1 18 Tf 48 %d Td (The quick brown fox jumps over the lazy dog.) Tj ET" % (height - 140),
@@ -105,9 +109,10 @@ def write(path: str, data: bytes) -> None:
 
 
 def main(argv) -> int:
-    if len(argv) == 4 and argv[1] == "--pages":
+    if len(argv) in (4, 7) and argv[1] == "--pages":
         count = int(argv[2])
-        write(argv[3], build([("Page %d" % (i + 1), 612, 792) for i in range(count)]))
+        width, height = (int(argv[5]), int(argv[6])) if len(argv) == 7 and argv[4] == "--size" else (612, 792)
+        write(argv[3], build([("Page %d" % (i + 1), width, height) for i in range(count)]))
         return 0
     if len(argv) != 1:
         print(__doc__)

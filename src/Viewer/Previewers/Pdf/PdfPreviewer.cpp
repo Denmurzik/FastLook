@@ -40,10 +40,10 @@ namespace fastlook::viewer
         constexpr double kMaxZoom = 4.0;
         constexpr double kZoomStep = 1.25;
         constexpr uint32_t kMaxRenderWidthPx = 4096;
-        constexpr double kMaxRenderPixels = 4e6; // 16 MB of BGRA per page
+        constexpr double kBorderDip = 1;
         constexpr auto kSizeProbeBudget = std::chrono::milliseconds(250); // measuring page sizes up front
         constexpr auto kRenderDelay = std::chrono::milliseconds(60);      // pages flown past while scrolling are never rendered
-        constexpr auto kResizeDebounce = std::chrono::milliseconds(200);
+        constexpr auto kResizeDebounce = std::chrono::milliseconds(150);
 
         constexpr Color kWhite{0xFF, 0xFF, 0xFF, 0xFF};
 
@@ -215,6 +215,7 @@ namespace fastlook::viewer
             if (auto self = weak.lock())
             {
                 self->UpdateCounter();
+                self->PumpRenders();
             }
         });
         m_sizeChangedRevoker = m_scroll.SizeChanged(winrt::auto_revoke, [weak](auto const&, auto const&) {
@@ -250,12 +251,18 @@ namespace fastlook::viewer
         m_resizeTimer.Tick([weak](auto const&, auto const&) {
             if (auto self = weak.lock(); self && self->m_loaded)
             {
-                self->m_fitWidthDip = self->m_pendingFitWidthDip;
-                self->Rebuild(true);
+                if (std::abs(self->m_pendingFitWidthDip - self->m_fitWidthDip) >= 1)
+                {
+                    self->m_fitWidthDip = self->m_pendingFitWidthDip;
+                    self->Rebuild(true);
+                }
+                self->m_settled = true;
+                self->PumpRenders();
             }
         });
 
         m_loaded = true;
+        m_settled = false;
         m_fitWidthDip = 0;
         m_zoom = 1.0;
     }
@@ -271,16 +278,17 @@ namespace fastlook::viewer
         {
             return;
         }
+        m_pendingFitWidthDip = width;
         if (m_fitWidthDip == 0)
         {
+            // Placeholders at once, but no renders until the window size has settled (it is still animating to its fitted size).
             m_fitWidthDip = width;
             Rebuild(false);
-            return;
         }
-        m_resizeTimer.Stop();
-        if (std::abs(width - m_fitWidthDip) >= 1)
+        if (!m_settled || std::abs(width - m_fitWidthDip) >= 1)
         {
-            m_pendingFitWidthDip = width;
+            m_settled = false;
+            m_resizeTimer.Stop();
             m_resizeTimer.Start();
         }
     }
@@ -315,23 +323,46 @@ namespace fastlook::viewer
             m_scroll.ChangeView(horizontal, vertical, nullptr, true);
         }
         UpdateCounter();
+        QueuePump();
     }
 
+    // The sheet is page-shaped inside its 1 px border.
     double PdfPreviewer::PageHeightDip(uint32_t index) const
     {
-        auto const size = m_pageSizes[index];
-        return size.Width > 0 ? m_pageWidthDip * size.Height / size.Width : m_pageWidthDip;
+        return std::max(0.0, m_pageWidthDip - 2 * kBorderDip) * PageAspect(index) + 2 * kBorderDip;
     }
 
-    uint32_t PdfPreviewer::TargetWidthPx(uint32_t index) const
+    double PdfPreviewer::PageAspect(uint32_t index) const
     {
-        double width = std::min<double>(m_pageWidthDip * m_ctx->scale, kMaxRenderWidthPx);
-        double const aspect = m_pageWidthDip > 0 ? PageHeightDip(index) / m_pageWidthDip : 1.0;
-        if (aspect > 0 && width * width * aspect > kMaxRenderPixels)
-        {
-            width = std::sqrt(kMaxRenderPixels / aspect);
-        }
+        auto const size = m_pageSizes[index];
+        return size.Width > 0 ? size.Height / size.Width : 1.0;
+    }
+
+    double PdfPreviewer::InnerWidthPx() const
+    {
+        return std::max(1.0, (m_pageWidthDip - 2 * kBorderDip) * m_ctx->scale);
+    }
+
+    // The widest render of the page that fits in `px` pixels, never wider than the page is shown.
+    uint32_t PdfPreviewer::WidthForPixels(uint32_t index, uint64_t px) const
+    {
+        double const aspect = std::max(PageAspect(index), 0.01);
+        double const width = std::min({InnerWidthPx(), static_cast<double>(kMaxRenderWidthPx), std::sqrt(static_cast<double>(px) / aspect)});
         return static_cast<uint32_t>(std::max(1.0, std::round(width)));
+    }
+
+    uint64_t PdfPreviewer::CachedPixels() const
+    {
+        uint64_t total = 0;
+        for (auto const& [index, rendered] : m_rendered)
+        {
+            total += rendered.px;
+        }
+        for (auto const& [index, rendering] : m_rendering)
+        {
+            total += rendering.px;
+        }
+        return total;
     }
 
     void PdfPreviewer::OnElementPrepared(ItemsRepeater const&, ItemsRepeaterElementPreparedEventArgs const& args)
@@ -345,25 +376,17 @@ namespace fastlook::viewer
         sheet.Height(PageHeightDip(index));
         m_realized[index] = sheet;
 
-        if (auto const evicted = m_lru.Touch(index))
-        {
-            Evict(*evicted);
-        }
         auto image = sheet.Child().as<Image>();
         if (auto it = m_rendered.find(index); it != m_rendered.end())
         {
             image.Source(it->second.source);
+            m_lru.Touch(index);
         }
         else
         {
             image.Source(nullptr);
-            if (!m_rendering.contains(index) && std::find(m_waiting.begin(), m_waiting.end(), index) == m_waiting.end())
-            {
-                m_waiting.push_back(index);
-            }
-            PumpRenders();
         }
-        UpdateCounter();
+        QueuePump(); // visibility needs the arranged position: after this layout pass
     }
 
     void PdfPreviewer::OnElementClearing(ItemsRepeater const&, ItemsRepeaterElementClearingEventArgs const& args)
@@ -383,18 +406,145 @@ namespace fastlook::viewer
         }
         if (auto image = sheet.Child().try_as<Image>())
         {
-            image.Source(nullptr); // the rendered page stays cached until the LRU evicts it
+            image.Source(nullptr); // the rendered page stays cached until it is evicted
         }
+    }
+
+    // Realized pages that intersect the viewport, ascending.
+    std::vector<uint32_t> PdfPreviewer::VisibleIndices() const
+    {
+        std::vector<uint32_t> visible;
+        double const height = m_scroll.ActualHeight();
+        for (auto const& [index, sheet] : m_realized)
+        {
+            try
+            {
+                double const top = sheet.TransformToVisual(m_scroll).TransformPoint({0, 0}).Y;
+                if (top < height && top + sheet.Height() > 0)
+                {
+                    visible.push_back(index);
+                }
+            }
+            catch (...)
+            {
+            }
+        }
+        return visible;
+    }
+
+    void PdfPreviewer::QueuePump()
+    {
+        if (m_pumpQueued || !m_loaded)
+        {
+            return;
+        }
+        m_pumpQueued = true;
+        m_ctx->ui.TryEnqueue([weak = std::weak_ptr<PdfPreviewer>(std::static_pointer_cast<PdfPreviewer>(shared_from_this()))] {
+            if (auto self = weak.lock())
+            {
+                self->m_pumpQueued = false;
+                if (self->m_loaded)
+                {
+                    self->UpdateCounter();
+                    self->PumpRenders();
+                }
+            }
+        });
+    }
+
+    // Starts the renders for visible pages that lack an image. Never evicts a visible page; squeezes the resolution instead.
+    void PdfPreviewer::PumpRenders()
+    {
+        if (!m_loaded || !m_settled || !m_scroll)
+        {
+            return;
+        }
+        auto const visible = VisibleIndices();
+        auto const isVisible = [&visible](uint32_t index) { return std::binary_search(visible.begin(), visible.end(), index); };
+
+        // A render for a page that has been scrolled away is not worth finishing.
+        for (auto it = m_rendering.begin(); it != m_rendering.end();)
+        {
+            if (!isVisible(it->first))
+            {
+                it->second.job->Cancel();
+                m_lru.Erase(it->first);
+                it = m_rendering.erase(it);
+            }
+            else
+            {
+                ++it;
+            }
+        }
+
+        double const share = std::min(kPagePixels, kBudgetPixels / static_cast<double>(std::max<size_t>(1, visible.size())));
+        for (uint32_t const index : visible)
+        {
+            if (m_failed.contains(index))
+            {
+                continue;
+            }
+            if (m_rendered.contains(index) || m_rendering.contains(index))
+            {
+                m_lru.Touch(index);
+                continue;
+            }
+            uint64_t const natural = static_cast<uint64_t>(InnerWidthPx() * InnerWidthPx() * PageAspect(index));
+            uint64_t wanted = std::min<uint64_t>(static_cast<uint64_t>(share), std::max<uint64_t>(natural, 1));
+            if (m_rendering.size() >= (wanted > kSerialAbovePx ? 1u : 2u))
+            {
+                break; // the next finish pumps again
+            }
+            wanted = Reserve(index, wanted, visible);
+            uint32_t const widthPx = WidthForPixels(index, wanted);
+            auto job = std::make_shared<RenderJob>();
+            uint64_t const id = ++m_nextRenderId;
+            m_rendering[index] = Rendering{id, wanted, job};
+            RenderPage(index, m_generation, id, widthPx, job);
+        }
+    }
+
+    // Makes room for a render of up to `wanted` pixels by evicting pages that are not visible; returns the pixels granted
+    // (less than wanted when the visible pages alone fill the budget).
+    uint64_t PdfPreviewer::Reserve(uint32_t index, uint64_t wanted, std::vector<uint32_t> const& visible)
+    {
+        auto const isVisible = [&visible](uint32_t i) { return std::binary_search(visible.begin(), visible.end(), i); };
+        if (auto const evicted = m_lru.TouchProtected(index, isVisible))
+        {
+            Evict(*evicted);
+        }
+        auto const budget = static_cast<uint64_t>(kBudgetPixels);
+        while (CachedPixels() + wanted > budget)
+        {
+            auto const victim = m_lru.OldestIf([&](uint32_t k) { return k != index && !isVisible(k); });
+            if (!victim)
+            {
+                break;
+            }
+            Evict(*victim);
+        }
+        uint64_t const used = CachedPixels();
+        if (used + wanted > budget)
+        {
+            wanted = std::max<uint64_t>(static_cast<uint64_t>(kFloorPixels), budget > used ? budget - used : 0);
+        }
+        return wanted;
     }
 
     void PdfPreviewer::Evict(uint32_t index)
     {
+        m_lru.Erase(index);
         if (auto realized = m_realized.find(index); realized != m_realized.end())
         {
             if (auto image = realized->second.Child().try_as<Image>())
             {
                 image.Source(nullptr);
             }
+        }
+        if (auto rendering = m_rendering.find(index); rendering != m_rendering.end())
+        {
+            rendering->second.job->Cancel();
+            m_rendering.erase(rendering);
         }
         if (auto it = m_rendered.find(index); it != m_rendered.end())
         {
@@ -416,37 +566,37 @@ namespace fastlook::viewer
         {
             CloseQuietly(rendered.source);
         }
+        for (auto& [index, rendering] : m_rendering)
+        {
+            rendering.job->Cancel();
+        }
         m_rendered.clear();
         m_rendering.clear();
-        m_waiting.clear();
+        m_failed.clear();
         m_lru.Clear();
     }
 
-    // Starts renders for realized pages that still lack an image, at most kMaxConcurrentRenders at a time.
-    void PdfPreviewer::PumpRenders()
-    {
-        while (m_loaded && m_rendering.size() < kMaxConcurrentRenders && !m_waiting.empty())
-        {
-            uint32_t const index = m_waiting.front();
-            m_waiting.pop_front();
-            if (m_realized.contains(index) && !m_rendered.contains(index) && m_lru.Contains(index))
-            {
-                m_rendering.insert(index);
-                RenderPage(index, m_generation, TargetWidthPx(index));
-            }
-        }
-    }
-
-    winrt::fire_and_forget PdfPreviewer::RenderPage(uint32_t index, uint64_t generation, uint32_t widthPx)
+    winrt::fire_and_forget PdfPreviewer::RenderPage(uint32_t index, uint64_t generation, uint64_t id, uint32_t widthPx,
+                                                    std::shared_ptr<RenderJob> job)
     {
         auto self = std::static_pointer_cast<PdfPreviewer>(shared_from_this());
         auto const ui = m_ctx->ui;
         auto const doc = m_doc;
-        // UI thread only: the render is over (done, stale or failed); a newer generation already dropped the set.
-        auto const finish = [&self, index, generation] {
-            if (generation == self->m_generation)
+        // UI thread only. Still the render the previewer is waiting for (not evicted, cancelled or superseded)?
+        auto const current = [&self, index, generation, id] {
+            if (generation != self->m_generation || !self->m_loaded)
+            {
+                return false;
+            }
+            auto it = self->m_rendering.find(index);
+            return it != self->m_rendering.end() && it->second.id == id;
+        };
+        // UI thread only: gives up this render's reservation and lets the next page start.
+        auto const abandon = [&self, index, &current] {
+            if (current())
             {
                 self->m_rendering.erase(index);
+                self->m_lru.Erase(index);
                 self->PumpRenders();
             }
         };
@@ -457,10 +607,15 @@ namespace fastlook::viewer
             {
                 co_return;
             }
-            // Not realized any more (scrolled past) or superseded by a zoom/resize: nothing to render.
-            if (generation != self->m_generation || !self->m_loaded || !self->m_realized.contains(index) || !self->m_lru.Contains(index))
+            // Superseded, or scrolled out of view during the delay: nothing to render.
+            if (!current())
             {
-                finish();
+                co_return;
+            }
+            auto const stillVisible = self->VisibleIndices();
+            if (!std::binary_search(stillVisible.begin(), stillVisible.end(), index))
+            {
+                abandon();
                 co_return;
             }
 
@@ -472,9 +627,15 @@ namespace fastlook::viewer
             options.BackgroundColor(kWhite);
             options.BitmapEncoderId(BitmapEncoder::BmpEncoderId()); // uncompressed: no PNG encode/decode round trip
             InMemoryRandomAccessStream stream;
-            co_await page.RenderToStreamAsync(stream, options);
-            auto decoder = co_await BitmapDecoder::CreateAsync(stream);
-            auto bitmap = co_await decoder.GetSoftwareBitmapAsync(BitmapPixelFormat::Bgra8, BitmapAlphaMode::Premultiplied);
+            auto render = page.RenderToStreamAsync(stream, options);
+            job->Set(render);
+            co_await render;
+            auto openDecoder = BitmapDecoder::CreateAsync(stream);
+            job->Set(openDecoder);
+            auto decoder = co_await openDecoder;
+            auto convert = decoder.GetSoftwareBitmapAsync(BitmapPixelFormat::Bgra8, BitmapAlphaMode::Premultiplied);
+            job->Set(convert);
+            auto bitmap = co_await convert;
             stream.Close();
             page.Close();
 
@@ -483,59 +644,62 @@ namespace fastlook::viewer
                 bitmap.Close();
                 co_return;
             }
-            auto const stale = [&] { return generation != self->m_generation || !self->m_loaded || !self->m_lru.Contains(index); };
-            if (stale())
+            // A page the up-front probe did not reach: keep its real size even when it is no longer wanted.
+            if (self->m_loaded && index < self->m_pageSizes.size() &&
+                (std::abs(self->m_pageSizes[index].Width - pageSize.Width) > 0.5 ||
+                 std::abs(self->m_pageSizes[index].Height - pageSize.Height) > 0.5))
+            {
+                self->m_pageSizes[index] = pageSize;
+                if (auto realized = self->m_realized.find(index); realized != self->m_realized.end())
+                {
+                    realized->second.Height(self->PageHeightDip(index));
+                }
+            }
+            if (!current())
             {
                 bitmap.Close();
-                finish();
                 co_return;
             }
+            uint64_t const px = static_cast<uint64_t>(bitmap.PixelWidth()) * static_cast<uint64_t>(bitmap.PixelHeight());
             SoftwareBitmapSource source;
             co_await source.SetBitmapAsync(bitmap);
             bitmap.Close();
-            if (stale())
+            if (!current())
             {
                 CloseQuietly(source);
-                finish();
                 co_return;
             }
 
-            finish();
-            if (auto old = self->m_rendered.find(index); old != self->m_rendered.end())
-            {
-                CloseQuietly(old->second.source);
-                old->second.source = source;
-            }
-            else
-            {
-                self->m_rendered.emplace(index, Rendered{source});
-            }
+            self->m_rendering.erase(index);
+            self->m_rendered[index] = Rendered{source, px};
             core::perf::Mark("pdf-page-rendered", "page=" + std::to_string(index) + " w=" + std::to_string(widthPx));
-
             if (auto realized = self->m_realized.find(index); realized != self->m_realized.end())
             {
                 if (auto image = realized->second.Child().try_as<Image>())
                 {
                     image.Source(source);
                 }
-                // A page the up-front probe did not reach: fix its height now that the real size is known.
-                if (std::abs(self->m_pageSizes[index].Width - pageSize.Width) > 0.5 ||
-                    std::abs(self->m_pageSizes[index].Height - pageSize.Height) > 0.5)
-                {
-                    self->m_pageSizes[index] = pageSize;
-                    realized->second.Height(self->PageHeightDip(index));
-                }
             }
+            self->PumpRenders();
+        }
+        catch (winrt::hresult_canceled const&)
+        {
+            // Cancelled by an eviction, a rebuild or Unload: whoever cancelled already dropped the reservation.
         }
         catch (...)
         {
             FL_LOG_INFO(L"Rendering a PDF page failed");
-            // The failure may have happened off the UI thread: clear the in-flight mark there.
-            ui.TryEnqueue([self, index, generation] {
-                if (generation == self->m_generation)
+            // The failure may have happened off the UI thread: give up the reservation there.
+            ui.TryEnqueue([self, index, generation, id] {
+                if (generation == self->m_generation && self->m_loaded)
                 {
-                    self->m_rendering.erase(index);
-                    self->PumpRenders();
+                    if (auto it = self->m_rendering.find(index); it != self->m_rendering.end() && it->second.id == id)
+                    {
+                        self->m_rendering.erase(it);
+                        self->m_lru.Erase(index);
+                        self->m_failed.insert(index);
+                        self->PumpRenders();
+                    }
                 }
             });
         }
