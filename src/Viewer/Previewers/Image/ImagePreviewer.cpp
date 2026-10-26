@@ -66,10 +66,13 @@ namespace fastlook::viewer
         }
         else
         {
-            animation = AnimatedImage::Open(m_path, wic, stop.get_token()); // null: still image (or a canvas over 4096x4096: first frame)
-            if (ctx->prefetch && animation)
+            if (ctx->prefetch && AnimatedImage::IsAnimated(m_path, wic))
             {
-                throw PreviewError{};
+                throw PreviewError{}; // animations are not prefetched; checked on headers, before any frame is parsed or decoded
+            }
+            if (!ctx->prefetch)
+            {
+                animation = AnimatedImage::Open(m_path, wic, stop.get_token()); // null: still image (or a canvas over the limit: first frame)
             }
             core::perf::Mark("img_anim_probe_done");
             if (!animation)

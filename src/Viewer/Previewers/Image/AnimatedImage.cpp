@@ -202,7 +202,8 @@ namespace fastlook::viewer
             uint32_t Next(std::span<uint32_t> out) override
             {
                 auto const& entry = m_file.frames[m_index];
-                auto decoder = DecoderFromMemory(m_wic.get(), entry.png);
+                auto const png = core::BuildApngFramePng(m_file, m_index); // built per frame: the colour chunks are held once
+                auto decoder = DecoderFromMemory(m_wic.get(), png);
                 com_ptr<IWICBitmapFrameDecode> frame;
                 check_hresult(decoder->GetFrame(0, frame.put()));
                 auto const size = CopyFramePbgra(m_wic.get(), frame.get(), m_file.canvas, m_frame);
@@ -345,6 +346,37 @@ namespace fastlook::viewer
             return nullptr;
         }
 
+        // The same header checks CreateSource makes, without parsing frames or building a source.
+        bool LooksAnimated(std::filesystem::path const& path, com_ptr<IWICImagingFactory2> const& wic)
+        {
+            auto const ext = Lower(path);
+            if (ext != L".gif" && ext != L".png" && ext != L".apng" && ext != L".webp")
+            {
+                return false;
+            }
+            auto const bytes = ReadWholeFile(path);
+            if (bytes.empty())
+            {
+                return false;
+            }
+            if (ext == L".png" || ext == L".apng")
+            {
+                return core::DeclaresApngAnimation(bytes);
+            }
+            if (ext == L".webp")
+            {
+                WebPBitstreamFeatures features{};
+                return WebPGetFeatures(bytes.data(), bytes.size(), &features) == VP8_STATUS_OK && features.has_animation;
+            }
+            auto const screen = core::GifLogicalScreenSize(bytes);
+            if (!screen || !core::CanAnimateCanvas(*screen) || !wic)
+            {
+                return false;
+            }
+            UINT count = 0;
+            return SUCCEEDED(DecoderFromMemory(wic.get(), bytes)->GetFrameCount(&count)) && count > 1;
+        }
+
         uint8_t* BufferData(winrt::Windows::Storage::Streams::IBuffer const& buffer)
         {
             uint8_t* data = nullptr;
@@ -372,6 +404,18 @@ namespace fastlook::viewer
         {
             FL_LOG_INFO(L"Animated image could not be opened; showing the first frame");
             return nullptr;
+        }
+    }
+
+    bool AnimatedImage::IsAnimated(std::filesystem::path const& path, com_ptr<IWICImagingFactory2> const& wic)
+    {
+        try
+        {
+            return LooksAnimated(path, wic);
+        }
+        catch (...)
+        {
+            return false;
         }
     }
 

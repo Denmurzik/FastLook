@@ -26,6 +26,9 @@ namespace fastlook::viewer
         // be read: the caller falls back to the still image path, which also reports the error. `wic` must come from `WicFactory()`
         // on the UI thread. Decodes the first frame.
         static std::shared_ptr<AnimatedImage> Open(std::filesystem::path const& path, winrt::com_ptr<IWICImagingFactory2> wic, std::stop_token stop);
+        // Background thread. Header-only probe for prefetch: true when Open would likely animate the file. Parses no frames and
+        // allocates no canvas; never throws.
+        static bool IsAnimated(std::filesystem::path const& path, winrt::com_ptr<IWICImagingFactory2> const& wic);
 
         AnimatedImage(std::unique_ptr<FrameSource> source, core::SizeU canvas);
         ~AnimatedImage();

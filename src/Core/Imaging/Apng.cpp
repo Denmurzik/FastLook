@@ -3,6 +3,8 @@
 #include <array>
 #include <cstring>
 
+#include "Imaging/DecodeMath.h"
+
 namespace fastlook::core
 {
     namespace
@@ -82,74 +84,101 @@ namespace fastlook::core
             return std::memcmp(c.type, type, 4) == 0;
         }
 
+        // Chunks a frame needs to decode with the right colours; everything else before IDAT (text, EXIF, private data) is dropped.
+        bool IsSharedColourChunk(Chunk const& c)
+        {
+            return Is(c, "PLTE") || Is(c, "tRNS") || Is(c, "gAMA") || Is(c, "cHRM") || Is(c, "sRGB") || Is(c, "sBIT") || Is(c, "iCCP");
+        }
+
         struct PendingFrame
         {
             FrameInfo info;
             std::vector<uint8_t> idat; // concatenated zlib data
             bool open = false;
         };
+
+        bool HasSignature(std::span<const uint8_t> file)
+        {
+            return file.size() >= 8 + 12 && std::memcmp(file.data(), kSignature, 8) == 0;
+        }
+
+        // Walks the chunks after the signature until `visit` returns false. False when a chunk is truncated.
+        template <typename Visit>
+        bool ForEachChunk(std::span<const uint8_t> file, Visit&& visit)
+        {
+            size_t pos = 8;
+            while (pos + 12 <= file.size())
+            {
+                Chunk chunk;
+                chunk.size = ReadU32(file.data() + pos);
+                if (chunk.size > file.size() - pos - 12)
+                {
+                    return false;
+                }
+                std::memcpy(chunk.type, file.data() + pos + 4, 4);
+                chunk.data = file.data() + pos + 8;
+                pos += 12 + static_cast<size_t>(chunk.size);
+                if (!visit(chunk))
+                {
+                    break;
+                }
+            }
+            return true;
+        }
+
+        // The canvas of an IHDR, when it may be animated: checked before any frame work.
+        std::optional<SizeU> AnimatableCanvas(Chunk const& ihdr)
+        {
+            if (ihdr.size != 13)
+            {
+                return std::nullopt;
+            }
+            SizeU const canvas{ReadU32(ihdr.data), ReadU32(ihdr.data + 4)};
+            return CanAnimateCanvas(canvas) ? std::optional{canvas} : std::nullopt;
+        }
     }
 
     std::optional<ApngFile> ParseApng(std::span<const uint8_t> file)
     {
-        if (file.size() < 8 + 12 || std::memcmp(file.data(), kSignature, 8) != 0)
+        if (!HasSignature(file))
         {
             return std::nullopt;
         }
 
         ApngFile result;
-        std::array<uint8_t, 13> ihdr{};
-        std::vector<uint8_t> shared; // PLTE, tRNS and other ancillary chunks that precede the image data
-        bool haveIhdr = false, haveActl = false, sawIdat = false, ended = false;
+        bool haveIhdr = false, haveActl = false, sawIdat = false, invalid = false;
         PendingFrame current;
 
         auto finish = [&] {
             if (current.open && !current.idat.empty())
             {
-                ApngFrame frame;
-                frame.info = current.info;
-                frame.png.insert(frame.png.end(), kSignature, kSignature + 8);
-                std::array<uint8_t, 13> header = ihdr;
-                WriteU32(header.data(), static_cast<uint32_t>(frame.info.rect.w));
-                WriteU32(header.data() + 4, static_cast<uint32_t>(frame.info.rect.h));
-                AppendChunk(frame.png, "IHDR", header.data(), header.size());
-                frame.png.insert(frame.png.end(), shared.begin(), shared.end());
-                AppendChunk(frame.png, "IDAT", current.idat.data(), current.idat.size());
-                AppendChunk(frame.png, "IEND", nullptr, 0);
-                result.frames.push_back(std::move(frame));
+                result.frames.push_back({current.info, std::move(current.idat)});
             }
             current = {};
         };
+        auto reject = [&] {
+            invalid = true;
+            return false;
+        };
 
-        size_t pos = 8;
         uint32_t sequence = 0;
-        while (pos + 12 <= file.size() && !ended)
-        {
-            Chunk chunk;
-            chunk.size = ReadU32(file.data() + pos);
-            if (chunk.size > file.size() - pos - 12)
-            {
-                return std::nullopt; // truncated
-            }
-            std::memcpy(chunk.type, file.data() + pos + 4, 4);
-            chunk.data = file.data() + pos + 8;
-            pos += 12 + static_cast<size_t>(chunk.size);
-
+        bool const complete = ForEachChunk(file, [&](Chunk const& chunk) {
             if (Is(chunk, "IHDR"))
             {
-                if (chunk.size != 13)
+                auto const canvas = AnimatableCanvas(chunk);
+                if (!canvas)
                 {
-                    return std::nullopt;
+                    return reject(); // the still path shows the first frame; no frame data is collected for it
                 }
-                std::memcpy(ihdr.data(), chunk.data, 13);
-                result.canvas = {ReadU32(chunk.data), ReadU32(chunk.data + 4)};
-                haveIhdr = result.canvas.w > 0 && result.canvas.h > 0;
+                std::memcpy(result.ihdr.data(), chunk.data, 13);
+                result.canvas = *canvas;
+                haveIhdr = true;
             }
             else if (Is(chunk, "acTL"))
             {
                 if (chunk.size != 8 || sawIdat)
                 {
-                    return std::nullopt;
+                    return reject();
                 }
                 uint32_t const declared = ReadU32(chunk.data);
                 result.loops = ReadU32(chunk.data + 4);
@@ -159,20 +188,20 @@ namespace fastlook::core
             {
                 if (!haveActl || !haveIhdr || chunk.size != 26 || ReadU32(chunk.data) != sequence++ || result.frames.size() >= kMaxFrames)
                 {
-                    return std::nullopt;
+                    return reject();
                 }
                 finish();
                 uint32_t const w = ReadU32(chunk.data + 4), h = ReadU32(chunk.data + 8);
                 uint32_t const x = ReadU32(chunk.data + 12), y = ReadU32(chunk.data + 16);
                 if (w == 0 || h == 0 || uint64_t{x} + w > result.canvas.w || uint64_t{y} + h > result.canvas.h)
                 {
-                    return std::nullopt;
+                    return reject();
                 }
                 uint16_t const num = ReadU16(chunk.data + 20), den = ReadU16(chunk.data + 22);
                 uint8_t const dispose = chunk.data[24], blend = chunk.data[25];
                 if (dispose > 2 || blend > 1)
                 {
-                    return std::nullopt;
+                    return reject();
                 }
                 current.open = true;
                 current.info.rect = {static_cast<int32_t>(x), static_cast<int32_t>(y), static_cast<int32_t>(w), static_cast<int32_t>(h)};
@@ -192,18 +221,27 @@ namespace fastlook::core
             {
                 if (!current.open || chunk.size < 4 || ReadU32(chunk.data) != sequence++)
                 {
-                    return std::nullopt;
+                    return reject();
                 }
                 current.idat.insert(current.idat.end(), chunk.data + 4, chunk.data + chunk.size);
             }
             else if (Is(chunk, "IEND"))
             {
-                ended = true;
+                return false;
             }
-            else if (!sawIdat)
+            else if (!sawIdat && IsSharedColourChunk(chunk))
             {
-                AppendChunk(shared, chunk.type, chunk.data, chunk.size); // PLTE, tRNS, gAMA, sRGB, ...
+                if (result.shared.size() + 12 + chunk.size > kMaxApngSharedBytes)
+                {
+                    return reject();
+                }
+                AppendChunk(result.shared, chunk.type, chunk.data, chunk.size);
             }
+            return true;
+        });
+        if (!complete || invalid)
+        {
+            return std::nullopt; // truncated or invalid
         }
         finish();
 
@@ -212,5 +250,46 @@ namespace fastlook::core
             return std::nullopt;
         }
         return result;
+    }
+
+    std::vector<uint8_t> BuildApngFramePng(ApngFile const& file, size_t index)
+    {
+        if (index >= file.frames.size())
+        {
+            return {};
+        }
+        auto const& frame = file.frames[index];
+        std::vector<uint8_t> png;
+        png.reserve(8 + 25 + file.shared.size() + 12 + frame.idat.size() + 12);
+        png.insert(png.end(), kSignature, kSignature + 8);
+        std::array<uint8_t, 13> header = file.ihdr;
+        WriteU32(header.data(), static_cast<uint32_t>(frame.info.rect.w));
+        WriteU32(header.data() + 4, static_cast<uint32_t>(frame.info.rect.h));
+        AppendChunk(png, "IHDR", header.data(), header.size());
+        png.insert(png.end(), file.shared.begin(), file.shared.end());
+        AppendChunk(png, "IDAT", frame.idat.data(), frame.idat.size());
+        AppendChunk(png, "IEND", nullptr, 0);
+        return png;
+    }
+
+    bool DeclaresApngAnimation(std::span<const uint8_t> file)
+    {
+        if (!HasSignature(file))
+        {
+            return false;
+        }
+        bool animatable = false, declared = false;
+        ForEachChunk(file, [&](Chunk const& chunk) {
+            if (Is(chunk, "IHDR"))
+            {
+                animatable = AnimatableCanvas(chunk).has_value();
+            }
+            else if (Is(chunk, "acTL"))
+            {
+                declared = chunk.size == 8 && ReadU32(chunk.data) > 1;
+            }
+            return !Is(chunk, "IDAT") && !Is(chunk, "IEND");
+        });
+        return animatable && declared;
     }
 }
