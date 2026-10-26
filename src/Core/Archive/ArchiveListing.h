@@ -13,7 +13,9 @@ namespace fastlook::core
 {
     struct ArchiveEntry
     {
-        std::wstring path; // '/'-separated, as stored (never resolved or extracted); cut at 1024 characters
+        // '/'-separated, as stored (never resolved or extracted); cut at 1024 characters. Bidi controls and other control
+        // characters are replaced with U+FFFD, so a name always reads as what it is.
+        std::wstring path;
         uint64_t size = 0;
         std::optional<uint64_t> compressedSize; // ZIP only; empty for the last entry and for other formats
         int64_t mtime = 0;                      // unix seconds

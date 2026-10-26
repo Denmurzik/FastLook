@@ -268,6 +268,19 @@ TEST(ArchiveListing, HostileNamesAreCutAndTraversalIsOnlyListed)
     EXPECT_EQ(l.entries[3].path, L"ok/file.txt"); // "./" has no name and is dropped
 }
 
+TEST(ArchiveListing, BidiAndControlCharactersInNamesAreNeutralised)
+{
+    // Final review B2#8: "invoice<RLO>fdp.exe" must not read as "invoiceexe.pdf".
+    auto const l = ListArchive(WriteTemp(L"bidi.zip", BuildZip({"invoice\xE2\x80\xAE" "fdp.exe", "a\x01" "b.txt",
+                                                                "x\xE2\x81\xA6" "y\xE2\x80\x8F" "z.txt", "\xD0\x9F\xD1\x80\xD0\xB8.txt"})),
+                               {}, {});
+    ASSERT_EQ(l.entries.size(), 4u);
+    EXPECT_EQ(l.entries[0].path, L"invoice\uFFFDfdp.exe");
+    EXPECT_EQ(l.entries[1].path, L"a\uFFFDb.txt");
+    EXPECT_EQ(l.entries[2].path, L"x\uFFFDy\uFFFDz.txt");
+    EXPECT_EQ(l.entries[3].path, L"\u041F\u0440\u0438.txt"); // ordinary non-ASCII names are untouched
+}
+
 TEST(ArchiveListing, ManyEntriesStayWithinTheLimit)
 {
     std::vector<std::string> names;

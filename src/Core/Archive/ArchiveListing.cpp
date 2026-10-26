@@ -409,10 +409,19 @@ namespace fastlook::core
             return std::nullopt;
         }
 
-        // '/'-separated, no leading "./", no trailing '/', cut at kMaxPathChars.
+        // Characters that change how a name reads without being visible: bidi embeddings, overrides and isolates
+        // ("invoice<U+202E>fdp.exe" displays as "invoiceexe.pdf"), marks, and C0/C1 controls.
+        bool IsDeceptiveChar(wchar_t c)
+        {
+            return c < 0x20 || (c >= 0x7F && c <= 0x9F) || c == 0x061C || c == 0x200E || c == 0x200F || (c >= 0x202A && c <= 0x202E) ||
+                   (c >= 0x2066 && c <= 0x2069);
+        }
+
+        // '/'-separated, no leading "./", no trailing '/', cut at kMaxPathChars; deceptive characters show as U+FFFD.
         std::wstring NormalizePath(std::wstring path)
         {
             std::replace(path.begin(), path.end(), L'\\', L'/');
+            std::replace_if(path.begin(), path.end(), IsDeceptiveChar, L'\uFFFD');
             size_t skip = 0;
             while (path.compare(skip, 2, L"./") == 0)
             {
