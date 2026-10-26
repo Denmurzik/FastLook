@@ -140,12 +140,20 @@ function Build-Rows {
     , $rows
 }
 
+# Acceptance numbers are only comparable on AC power: the power state goes into the JSON and the console output.
+function Get-PowerState {
+    Add-Type -AssemblyName System.Windows.Forms
+    $line = [string][Windows.Forms.SystemInformation]::PowerStatus.PowerLineStatus
+    $plan = ((powercfg /getactivescheme) -replace '^.*\((.*)\).*$', '$1')
+    [ordered]@{ powerLine = $line; powerPlan = $plan }
+}
+
 function Save-Result {
     $rows = (Build-Rows)
     $failed = @($rows | Where-Object Status -eq 'FAIL')
     $exitTexts = [ordered]@{}; foreach ($n in $allSteps) { $exitTexts[$n] = Get-ExitText $n }
     [ordered]@{
-        date = (Get-Date -Format 'o'); configuration = $Configuration; failed = $failed.Count; stepsRun = $selected
+        date = (Get-Date -Format 'o'); power = (Get-PowerState); configuration = $Configuration; failed = $failed.Count; stepsRun = $selected
         steps = $state; exitCodes = $exitTexts; rows = $rows
     } | ConvertTo-Json -Depth 8 | Set-Content (Join-Path $repo 'out\perf-acceptance.json') -Encoding utf8
     $rows
@@ -183,6 +191,8 @@ foreach ($name in $allSteps) {
 
 $rows = Save-Result
 Write-Host ''
+$power = Get-PowerState
+Write-Host ('Power: {0} ({1}){2}' -f $power.powerLine, $power.powerPlan, $(if ($power.powerLine -ne 'Online') { '  WARNING: not on AC, CPU-bound rows are not comparable' } else { '' }))
 Write-Host ('Performance acceptance ({0}), {1}; steps run: {2}' -f $Configuration, (Get-Date -Format 'yyyy-MM-dd HH:mm'), $(if ($selected.Count) { $selected -join ',' } else { 'none (stored data)' }))
 $rows | Format-Table Status, Metric, Value, Target, Source -AutoSize | Out-String -Width 220 | Write-Host
 $rows | Where-Object Detail | ForEach-Object { Write-Host ("note: {0}: {1}" -f $_.Metric, $_.Detail) }
