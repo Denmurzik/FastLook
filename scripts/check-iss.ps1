@@ -65,8 +65,8 @@ Check 'language russian' ($text -match '(?m)^Name: "russian";')
 Check 'task autostart (checked by default)' ($text -match '(?m)^Name: "autostart";' -and $text -notmatch '(?m)^Name: "autostart";.*unchecked')
 Check 'autostart task texts EN + RU' ($text -match 'Start FastLook with Windows' -and $text -match 'Запускать FastLook вместе с Windows')
 $runKey = 'Software\Microsoft\Windows\CurrentVersion\Run'
-Check 'Registry Run value (HKCU, FastLook, autostart, uninsdeletevalue)' (
-    $text.Contains('Root: HKCU; Subkey: "' + $runKey + '"; ValueType: string; ValueName: "FastLook"; ValueData: """{app}\FastLook.exe"""; Tasks: autostart; Check: ShouldWriteAutostart; Flags: uninsdeletevalue'))
+Check 'Registry Run value (HKCU, FastLook, autostart, no uninsdeletevalue)' (
+    $text.Contains('Root: HKCU; Subkey: "' + $runKey + '"; ValueType: string; ValueName: "FastLook"; ValueData: """{app}\FastLook.exe"""; Tasks: autostart; Check: ShouldWriteAutostart') -and -not $text.Contains('uninsdeletevalue'))
 Check 'Icons {userprograms}\FastLook' ($text.Contains('Name: "{userprograms}\FastLook"; Filename: "{app}\FastLook.exe"'))
 Check 'Run FastLook.exe nowait postinstall, no skipifsilent' (
     $text -match '(?m)^Filename: "\{app\}\\FastLook\.exe";.*nowait postinstall' -and $text -notmatch 'skipifsilent')
@@ -79,9 +79,9 @@ Check 'prompt skipped when silent' ($text.Contains('if not UninstallSilent then'
 Check 'RegDeleteValue Run\FastLook (also when silent)' (
     $text.Contains("RegDeleteValue(HKEY_CURRENT_USER, RunKey, 'FastLook')") -and $text.Contains("RunKey = '$runKey'"))
 Check 'silent upgrade keeps autostart state (Check: ShouldWriteAutostart)' (
-    $text.Contains('function ShouldWriteAutostart') -and $text.Contains('WizardSilent and IsUpgrade') -and $text.Contains('IsUpgrade := RegKeyExists(HKEY_CURRENT_USER, UninstallKey)') -and $text.Contains("RegValueExists(HKEY_CURRENT_USER, RunKey, 'FastLook')"))
+    $text.Contains('function ShouldWriteAutostart') -and $text.Contains('WizardSilent and IsUpgrade') -and $text.Contains('IsUpgrade := RegKeyExists(HKEY_CURRENT_USER, UninstallKey)') -and $text.Contains("RunValueIsOurs"))
 Check 'shutdown: one retry, silent taskkill fallback, interactive Retry' (
-    $text.Contains('TryShutdown(Exe) = 0) or (TryShutdown(Exe) = 0)') -and $text.Contains('taskkill.exe') -and $text.Contains('MB_RETRYCANCEL'))
+    $text.Contains('TryShutdown(Exe) = 0) or (TryShutdown(Exe) = 0)') -and $text.Contains('Stop-Process -Force') -and $text.Contains('MB_RETRYCANCEL'))
 Check '[InstallDelete] removes stale runtime files' ($text -match '(?m)^\[InstallDelete\]' -and $text.Contains('Name: "{app}\*.dll"'))
 Check 'UTF-8 BOM (Russian strings)' ([IO.File]::ReadAllBytes((Resolve-Path $Iss))[0..2] -join ',' -eq '239,187,191')
 

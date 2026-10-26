@@ -43,7 +43,9 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 english.AutostartTask=Start FastLook with Windows
 russian.AutostartTask=Запускать FastLook вместе с Windows
 english.StillRunning=FastLook is still running and could not be stopped. Exit it from the tray icon (or end FastLook.exe in Task Manager) and click Retry.
+english.CannotStop=FastLook is still running and could not be stopped. Exit it from the tray icon (or end FastLook.exe in Task Manager) and run Setup again.
 russian.StillRunning=FastLook всё ещё работает, и его не удалось остановить. Закройте его через значок в трее (или завершите FastLook.exe в диспетчере задач) и нажмите «Повторить».
+russian.CannotStop=FastLook всё ещё работает, и его не удалось остановить. Закройте его через значок в трее (или завершите FastLook.exe в диспетчере задач) и запустите установку снова.
 english.DeleteData=Delete FastLook settings and logs?
 russian.DeleteData=Удалить настройки и журналы FastLook?
 
@@ -66,7 +68,7 @@ Type: files; Name: "{app}\*.txt"; Check: IsUpgradeInstall
 Name: "{userprograms}\FastLook"; Filename: "{app}\FastLook.exe"
 
 [Registry]
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "FastLook"; ValueData: """{app}\FastLook.exe"""; Tasks: autostart; Check: ShouldWriteAutostart; Flags: uninsdeletevalue
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "FastLook"; ValueData: """{app}\FastLook.exe"""; Tasks: autostart; Check: ShouldWriteAutostart
 
 [Run]
 Filename: "{app}\FastLook.exe"; Description: "{cm:LaunchProgram,FastLook}"; Flags: nowait postinstall
@@ -85,6 +87,17 @@ function InitializeSetup(): Boolean;
 begin
   IsUpgrade := RegKeyExists(HKEY_CURRENT_USER, UninstallKey);
   Result := True;
+end;
+
+// Where the in-app updater puts its download: GetTempPath order, TMP before TEMP.
+function UpdateDownloadDir: String;
+var
+  T: String;
+begin
+  T := GetEnv('TMP');
+  if T = '' then
+    T := GetEnv('TEMP');
+  Result := RemoveBackslashUnlessRoot(T) + '\FastLook-Update';
 end;
 
 function IsUpgradeInstall: Boolean;
@@ -106,7 +119,7 @@ end;
 function ShouldWriteAutostart: Boolean;
 begin
   if WizardSilent and IsUpgrade then
-    Result := RegValueExists(HKEY_CURRENT_USER, RunKey, 'FastLook')
+    Result := RunValueIsOurs
   else
     Result := True;
 end;
@@ -117,7 +130,7 @@ begin
   if (CurPageID = wpSelectTasks) and IsUpgrade and not AutostartPreset then
   begin
     AutostartPreset := True;
-    if RegValueExists(HKEY_CURRENT_USER, RunKey, 'FastLook') then
+    if RunValueIsOurs then
       WizardSelectTasks('autostart')
     else
       WizardSelectTasks('!autostart');
@@ -160,6 +173,9 @@ begin
         '-and $_.Path -and $_.Path.StartsWith($d, [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force"',
         '', SW_HIDE, ewWaitUntilTerminated, Code);
       Sleep(1000);
+      // PowerShell may be blocked (AppLocker, ConstrainedLanguage): do not continue over a live FastLook.
+      if CheckForMutexes('Local\FastLook-Daemon') then
+        Result := False;
       Exit;
     end;
     if MsgBox(CustomMessage('StillRunning'), mbError, MB_RETRYCANCEL) <> IDRETRY then
@@ -175,7 +191,7 @@ begin
   Result := '';
   // Abort does not stop Setup here; a non-empty result stops it on the Preparing to Install page with this text.
   if not StopFastLook(ExpandConstant('{app}'), WizardSilent) then
-    Result := CustomMessage('StillRunning');
+    Result := CustomMessage('CannotStop');
 end;
 
 function InitializeUninstall(): Boolean;
@@ -187,12 +203,12 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usPostUninstall then
   begin
-    // Autostart may have been enabled later from Settings; uninsdeletevalue only covers the installer's own entry.
+    // Autostart may have been enabled later from Settings; the Run value is not installer-owned.
     // Only if it points at this install: a portable copy keeps its own autostart.
     if RunValueIsOurs then
       RegDeleteValue(HKEY_CURRENT_USER, RunKey, 'FastLook');
     // Installer downloaded by the in-app updater.
-    DelTree(ExpandConstant('{%TEMP}\FastLook-Update'), True, True, True);
+    DelTree(UpdateDownloadDir, True, True, True);
     if not UninstallSilent then
       if MsgBox(CustomMessage('DeleteData'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
         DelTree(ExpandConstant('{localappdata}\FastLook'), True, True, True);
