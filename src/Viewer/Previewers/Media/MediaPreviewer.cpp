@@ -6,6 +6,7 @@
 #include <cmath>
 #include <coroutine>
 #include <cwctype>
+#include <functional>
 #include <thread>
 
 #include <winrt/Windows.UI.Text.h>
@@ -26,6 +27,7 @@ namespace fastlook::viewer
         using winrt::Windows::Media::Playback::MediaPlayer;
 
         constexpr auto kOpenTimeout = std::chrono::seconds(3);
+        constexpr auto kCloseDelay = std::chrono::milliseconds(100);
         constexpr auto kVolumeSaveDelay = std::chrono::milliseconds(500);
         constexpr double kCoverDip = 160;
         constexpr int kCoverRequestPx = 256;
@@ -74,8 +76,21 @@ namespace fastlook::viewer
                 return Awaiter{*this};
             }
 
+            // Runs `work` on the media thread; false when the thread could not take it.
+            bool Post(std::function<void()> work)
+            {
+                auto* call = new std::function<void()>(std::move(work));
+                if (PostThreadMessageW(m_id, kCall, 0, reinterpret_cast<LPARAM>(call)))
+                {
+                    return true;
+                }
+                delete call;
+                return false;
+            }
+
         private:
             static constexpr UINT kRun = WM_APP + 1;
+            static constexpr UINT kCall = WM_APP + 2;
 
             MediaThread()
             {
@@ -91,6 +106,19 @@ namespace fastlook::viewer
                         if (msg.hwnd == nullptr && msg.message == kRun)
                         {
                             std::coroutine_handle<>::from_address(reinterpret_cast<void*>(msg.lParam)).resume();
+                            continue;
+                        }
+                        if (msg.hwnd == nullptr && msg.message == kCall)
+                        {
+                            std::unique_ptr<std::function<void()>> const call{reinterpret_cast<std::function<void()>*>(msg.lParam)};
+                            try
+                            {
+                                (*call)();
+                            }
+                            catch (...)
+                            {
+                                FL_LOG_INFO(L"A media thread call failed");
+                            }
                             continue;
                         }
                         TranslateMessage(&msg);
@@ -110,6 +138,91 @@ namespace fastlook::viewer
             std::atomic<bool> failed{false};
             void Set() const { ::SetEvent(signal.get()); }
         };
+
+        void ClosePlayer(MediaPlayer const& player, winrt::Windows::Media::Core::MediaSource const& source)
+        {
+            try
+            {
+                player.Source(nullptr);
+                player.Close();
+            }
+            catch (winrt::hresult_error const&)
+            {
+                FL_LOG_INFO(L"Closing the media player failed");
+            }
+            try
+            {
+                if (source)
+                {
+                    source.Close();
+                }
+            }
+            catch (winrt::hresult_error const&)
+            {
+                FL_LOG_INFO(L"Closing the media source failed");
+            }
+        }
+
+        // Closes a player that was shown, in a fixed order: the element is already detached; once the compositor has produced a
+        // frame without the video (or after kCloseDelay when the window is hidden and renders nothing), the player and its source
+        // are closed on the media thread that created them.
+        void CloseAfterFrame(MediaPlayer player, winrt::Windows::Media::Core::MediaSource source,
+                             winrt::Microsoft::UI::Dispatching::DispatcherQueue const& ui)
+        {
+            using winrt::Microsoft::UI::Xaml::Media::CompositionTarget;
+            struct Pending
+            {
+                MediaPlayer player{nullptr};
+                winrt::Windows::Media::Core::MediaSource source{nullptr};
+                winrt::event_token rendering{};
+                winrt::Microsoft::UI::Dispatching::DispatcherQueueTimer timer{nullptr};
+                bool done = false;
+            };
+            auto pending = std::make_shared<Pending>();
+            pending->player = std::move(player);
+            pending->source = std::move(source);
+            auto finish = [pending] {
+                if (std::exchange(pending->done, true))
+                {
+                    return;
+                }
+                if (pending->rendering)
+                {
+                    CompositionTarget::Rendering(pending->rendering);
+                }
+                if (pending->timer)
+                {
+                    pending->timer.Stop();
+                    pending->timer = nullptr; // drops the Tick handler that holds `pending`
+                }
+                auto player = std::move(pending->player);
+                auto source = std::move(pending->source);
+                if (!MediaThread::Get().Post([player, source] { ClosePlayer(player, source); }))
+                {
+                    ClosePlayer(player, source);
+                }
+            };
+            try
+            {
+                // The first Rendering event is the frame being built now: close after the next one.
+                auto frames = std::make_shared<int>(0);
+                pending->rendering = CompositionTarget::Rendering([finish, frames](auto const&, auto const&) {
+                    if (++*frames >= 2)
+                    {
+                        finish();
+                    }
+                });
+                pending->timer = ui.CreateTimer();
+                pending->timer.Interval(kCloseDelay);
+                pending->timer.IsRepeating(false);
+                pending->timer.Tick([finish](auto const&, auto const&) { finish(); });
+                pending->timer.Start();
+            }
+            catch (...)
+            {
+                finish();
+            }
+        }
 
         // Closes the player on every exit from PrepareAsync that did not hand it over to the previewer.
         struct PlayerGuard
@@ -461,7 +574,7 @@ namespace fastlook::viewer
 
     void MediaPreviewer::CloseMedia()
     {
-        // Detach the element first, then close the player, then the source; each step is attempted even if the previous threw.
+        // Detach the element and stop playback now; the player and its source are closed after the next frame (CloseAfterFrame).
         auto const attempt = [](auto&& step) {
             try
             {
@@ -484,21 +597,12 @@ namespace fastlook::viewer
                 m_player.VolumeChanged(m_volumeToken);
                 m_player.MediaFailed(m_failedToken);
                 m_player.Pause();
-                m_player.Source(nullptr);
             }
         });
-        attempt([&] {
-            if (m_player)
-            {
-                m_player.Close();
-            }
-        });
-        attempt([&] {
-            if (m_source)
-            {
-                m_source.Close();
-            }
-        });
+        if (m_player)
+        {
+            CloseAfterFrame(std::exchange(m_player, nullptr), std::exchange(m_source, nullptr), m_ctx->ui);
+        }
         m_player = nullptr;
         m_source = nullptr;
         m_element = nullptr;
