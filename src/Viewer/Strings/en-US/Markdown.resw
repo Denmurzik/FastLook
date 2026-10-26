@@ -30,4 +30,7 @@
   <data name="CopyTruncated" xml:space="preserve">
     <value>Copied only the first {0} characters</value>
   </data>
+  <data name="BlockTruncated" xml:space="preserve">
+    <value>This block is shown shortened. Switch to Source to see all of it.</value>
+  </data>
 </root>

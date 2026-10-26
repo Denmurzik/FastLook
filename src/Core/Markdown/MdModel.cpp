@@ -2,6 +2,7 @@
 
 #include <md4c.h>
 
+#include <algorithm>
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -13,6 +14,7 @@ namespace fastlook::core::md
     namespace
     {
         constexpr size_t kMaxBlockDepth = 64;
+        constexpr size_t kCharsPerHighlightRun = 4;
 
         struct NamedEntity
         {
@@ -411,5 +413,86 @@ namespace fastlook::core::md
         if (md_parse(utf8.data(), static_cast<MD_SIZE>(utf8.size()), &parser, &builder) != 0)
             return {};
         return builder.Take();
+    }
+}
+
+namespace fastlook::core::md
+{
+    namespace
+    {
+        void AddWeight(std::vector<Block> const& blocks, RenderWeight& weight)
+        {
+            weight.blocks += blocks.size();
+            for (auto const& block : blocks)
+            {
+                weight.inlines += block.spans.size();
+                if (block.type == BlockType::Code || block.type == BlockType::Html)
+                {
+                    std::wstring_view text = block.text;
+                    if (text.ends_with(L'\n'))
+                    {
+                        text.remove_suffix(1); // the renderer drops the final line feed too
+                    }
+                    std::wstring const literal = ShortenLiteral(text).text;
+                    weight.inlines += 2 * (static_cast<size_t>(std::count(literal.begin(), literal.end(), L'\n')) + 1);
+                    bool const tagged = block.lang.find_first_not_of(L" \t") != std::wstring::npos;
+                    if (block.type == BlockType::Code && tagged && literal.size() <= kMaxHighlightBytes)
+                    {
+                        weight.inlines += literal.size() / kCharsPerHighlightRun;
+                    }
+                }
+                AddWeight(block.children, weight);
+            }
+        }
+    }
+
+    RenderedLiteral ShortenLiteral(std::wstring_view text)
+    {
+        RenderedLiteral out;
+        if (text.size() <= kMaxLiteralLineChars)
+        {
+            out.text = text; // no line can be too long, nor the whole
+            return out;
+        }
+        size_t start = 0;
+        while (start < text.size())
+        {
+            size_t const feed = text.find(L'\n', start);
+            bool const last = feed == std::wstring_view::npos;
+            std::wstring_view line = text.substr(start, (last ? text.size() : feed) - start);
+            bool const cut = line.size() > kMaxLiteralLineChars;
+            if (cut)
+            {
+                line = line.substr(0, kMaxLiteralLineChars);
+                if (line.back() >= 0xD800 && line.back() <= 0xDBFF)
+                {
+                    line.remove_suffix(1); // keep the surrogate pair whole
+                }
+            }
+            if (out.text.size() + line.size() + 2 > kMaxLiteralChars)
+            {
+                out.shortened = true;
+                break;
+            }
+            out.text += line;
+            if (cut)
+            {
+                out.text += L'\u2026';
+                out.shortened = true;
+            }
+            if (!last)
+            {
+                out.text += L'\n';
+            }
+            start = last ? text.size() : feed + 1;
+        }
+        return out;
+    }
+
+    RenderWeight EstimateRenderWeight(Document const& document)
+    {
+        RenderWeight weight;
+        AddWeight(document.blocks, weight);
+        return weight;
     }
 }

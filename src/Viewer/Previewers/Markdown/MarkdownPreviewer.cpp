@@ -23,22 +23,7 @@ namespace fastlook::viewer
     {
         constexpr uint64_t kMaxRenderedBytes = 2ull * 1024 * 1024; // larger files open as source
         constexpr size_t kMaxRenderedBlocks = 4000;                // XAML elements are heavy: bigger documents open as source
-        constexpr size_t kMaxRenderedSpans = 40000;                // one Run/Hyperlink each; keeps the UI-thread build bounded
-
-        struct Weight
-        {
-            size_t blocks = 0, spans = 0;
-        };
-
-        void Count(std::vector<core::md::Block> const& blocks, Weight& w)
-        {
-            w.blocks += blocks.size();
-            for (auto const& block : blocks)
-            {
-                w.spans += block.spans.size();
-                Count(block.children, w);
-            }
-        }
+        constexpr size_t kMaxRenderedInlines = 40000;              // Runs/LineBreaks/Hyperlinks; keeps the UI-thread build bounded
 
         enum class ReadResult
         {
@@ -143,9 +128,8 @@ namespace fastlook::viewer
                 utf8 = core::ToUtf8(core::DecodeToUtf16(body, info));
             }
             parsed = core::md::Parse(utf8);
-            Weight weight;
-            Count(parsed.blocks, weight);
-            sourceOnly = weight.blocks > kMaxRenderedBlocks || weight.spans > kMaxRenderedSpans;
+            auto const weight = core::md::EstimateRenderWeight(parsed); // counts code/HTML lines and highlight runs too
+            sourceOnly = weight.blocks > kMaxRenderedBlocks || weight.inlines > kMaxRenderedInlines;
         }
         if (cancel())
         {

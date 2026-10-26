@@ -34,7 +34,6 @@ namespace fastlook::viewer
         using core::md::SpanFlag;
 
         constexpr size_t kMaxImages = 40;          // pictures decoded per document; the rest show their alt text
-        constexpr size_t kMaxHighlightBytes = 128 * 1024;
         constexpr int kMaxDepth = 32;              // XAML nesting guard (the model flattens at 64)
         constexpr size_t kMaxLinkLength = 2048;
         constexpr double kContentWidth = 860.0;    // DIP, the reading column
@@ -652,9 +651,20 @@ namespace fastlook::viewer
             return std::wstring{lang};
         }
 
+        // After a literal shortened by ShortenLiteral: says that Source shows the whole block.
+        void AddTruncatedNotice(InlineCollection const& inlines, std::wstring_view rendered, RenderState const& st)
+        {
+            if (!rendered.empty() && !rendered.ends_with(L'\n'))
+            {
+                inlines.Append(LineBreak{});
+            }
+            inlines.Append(MakeRun(Str(L"Markdown", L"BlockTruncated"), Fmt{.italic = true}, st, st.palette->subtle));
+        }
+
         UIElement BuildCode(Block const& code, RenderState& st)
         {
-            std::wstring_view const text = StripFinalNewline(code.text);
+            auto const rendered = core::md::ShortenLiteral(StripFinalNewline(code.text));
+            std::wstring_view const text = rendered.text;
             RichTextBlock block;
             block.IsTextSelectionEnabled(true);
             TrackSelection(block, st);
@@ -674,7 +684,7 @@ namespace fastlook::viewer
             }
             std::string const utf8 = core::ToUtf8(text);
             std::vector<core::StyleRun> runs;
-            if (!lexer.empty() && !utf8.empty() && utf8.size() <= kMaxHighlightBytes)
+            if (!lexer.empty() && !utf8.empty() && utf8.size() <= core::md::kMaxHighlightBytes)
             {
                 runs = core::HighlightBuffer(utf8, lexer);
             }
@@ -706,6 +716,10 @@ namespace fastlook::viewer
                 }
                 emit(position, utf8.size(), core::TokenCategory::Default);
             }
+            if (rendered.shortened)
+            {
+                AddTruncatedNotice(inlines, text, st);
+            }
             block.Blocks().Append(paragraph);
 
             ScrollViewer scroller;
@@ -735,7 +749,13 @@ namespace fastlook::viewer
             block.FontSize(13);
             block.Foreground(Brush(st.palette->subtle));
             Paragraph paragraph;
-            AddText(paragraph.Inlines(), StripFinalNewline(html.text), {}, st, st.palette->subtle);
+            auto const rendered = core::md::ShortenLiteral(StripFinalNewline(html.text));
+            std::wstring_view const text = rendered.text;
+            AddText(paragraph.Inlines(), text, {}, st, st.palette->subtle);
+            if (rendered.shortened)
+            {
+                AddTruncatedNotice(paragraph.Inlines(), text, st);
+            }
             block.Blocks().Append(paragraph);
             return block;
         }

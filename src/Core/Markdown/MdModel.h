@@ -78,6 +78,31 @@ namespace fastlook::core::md
         std::vector<Block> blocks;
     };
 
+    // Render budget shared by the Viewer's renderer and its size guard.
+    constexpr size_t kMaxLiteralChars = 32 * 1024;    // code/HTML block text rendered per block; Source shows the rest
+    constexpr size_t kMaxLiteralLineChars = 1000;     // a longer line (minified code) is cut: a wide NoWrap line is a huge surface
+    constexpr size_t kMaxHighlightBytes = 128 * 1024; // larger code blocks (UTF-8) are rendered without highlighting
+
+    struct RenderedLiteral
+    {
+        std::wstring text;
+        bool shortened = false; // lines were dropped or cut
+    };
+
+    // The part of a code/HTML literal that is rendered: whole lines up to kMaxLiteralChars in total, each line cut at
+    // kMaxLiteralLineChars and then ended with U+2026 (never inside a surrogate pair).
+    RenderedLiteral ShortenLiteral(std::wstring_view text);
+
+    struct RenderWeight
+    {
+        size_t blocks = 0;
+        size_t inlines = 0; // Runs, LineBreaks and Hyperlinks, roughly
+    };
+
+    // What rendering `document` costs in XAML elements: every block and span, a Run plus a LineBreak per rendered code/HTML line,
+    // and for fenced code with a language tag one Run per ~4 characters (highlight tokens).
+    RenderWeight EstimateRenderWeight(Document const& document);
+
     // Returns an empty Document on input over 4 GiB or if md4c fails.
     // GitHub dialect (tables, strikethrough, task lists, permissive autolinks). Soft breaks become a space,
     // hard breaks L"\n"; entities are decoded. Nesting deeper than 64 blocks is flattened into the 64th.

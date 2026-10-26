@@ -30,4 +30,7 @@
   <data name="CopyTruncated" xml:space="preserve">
     <value>Скопированы только первые {0} символов</value>
   </data>
+  <data name="BlockTruncated" xml:space="preserve">
+    <value>Блок показан сокращённо. Полностью он виден в режиме «Исходник».</value>
+  </data>
 </root>

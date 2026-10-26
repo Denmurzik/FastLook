@@ -228,3 +228,81 @@ TEST(MdModel, InvalidUtf8BecomesReplacementCharacters)
     EXPECT_NE(d.blocks[1].text.find(L'\uFFFD'), std::wstring::npos);
     EXPECT_NE(d.blocks[2].spans[0].text.find(L'\uFFFD'), std::wstring::npos);
 }
+
+TEST(MdModel, ShortenLiteralKeepsWholeLinesUpToTheCap)
+{
+    std::wstring const shortText = L"line 1\nline 2\n";
+    auto const same = ShortenLiteral(shortText);
+    EXPECT_EQ(same.text, shortText);
+    EXPECT_FALSE(same.shortened);
+
+    std::wstring lines;
+    while (lines.size() <= kMaxLiteralChars)
+    {
+        lines += L"0123456789\n";
+    }
+    auto const cut = ShortenLiteral(lines);
+    EXPECT_TRUE(cut.shortened);
+    EXPECT_LE(cut.text.size(), kMaxLiteralChars);
+    EXPECT_GT(cut.text.size(), kMaxLiteralChars - 22);
+    EXPECT_EQ(cut.text.back(), L'\n');
+    EXPECT_EQ(lines.compare(0, cut.text.size(), cut.text), 0);
+
+    std::wstring fits;
+    for (int i = 0; i < 100; ++i)
+    {
+        fits += L"0123456789\n";
+    }
+    auto const whole = ShortenLiteral(fits);
+    EXPECT_EQ(whole.text, fits);
+    EXPECT_FALSE(whole.shortened);
+}
+
+TEST(MdModel, ShortenLiteralCutsLongLines)
+{
+    std::wstring minified(kMaxLiteralLineChars - 1, L'x');
+    minified += L"\U0001F600 and more\nnext line"; // a surrogate pair straddles the line cap
+    auto const cut = ShortenLiteral(minified);
+    EXPECT_TRUE(cut.shortened);
+    EXPECT_EQ(cut.text, std::wstring(kMaxLiteralLineChars - 1, L'x') + L"\u2026\nnext line");
+
+    auto const huge = ShortenLiteral(std::wstring(200000, L'y'));
+    EXPECT_EQ(huge.text.size(), kMaxLiteralLineChars + 1);
+}
+
+TEST(MdModel, RenderWeightCountsCodeLinesAndHighlightRuns)
+{
+    // Final review B2#2: a fence is one block without spans, but renders a Run and a LineBreak per line.
+    std::string log = "```\n";
+    for (int i = 0; i < 500; ++i)
+    {
+        log += "2026-10-26 12:00:00 INFO something happened\n";
+    }
+    log += "```\n";
+    auto const plain = EstimateRenderWeight(Parse(log));
+    EXPECT_EQ(plain.blocks, 1u);
+    EXPECT_GE(plain.inlines, 1000u);
+
+    std::string tagged = "```json\n";
+    for (int i = 0; i < 1000; ++i)
+    {
+        tagged += "{\"key\": [1, 2, 3], \"other\": true},\n";
+    }
+    tagged += "```\n";
+    auto const highlighted = EstimateRenderWeight(Parse(tagged));
+    EXPECT_GE(highlighted.inlines, 1800u + 30000u / 4); // shortened to kMaxLiteralChars first
+
+    auto const html = EstimateRenderWeight(Parse("<div>\n" + std::string(3000, 'a') + "\n</div>\n"));
+    EXPECT_GE(html.inlines, 4u);
+
+    auto const prose = EstimateRenderWeight(Parse("# Title\n\nHello **bold** world\n"));
+    EXPECT_EQ(prose.blocks, 2u);
+    EXPECT_LE(prose.inlines, 5u);
+}
+
+TEST(MdModel, RenderWeightOfAHugeFenceCountsOnlyTheRenderedPart)
+{
+    std::string fence = "```\n" + std::string(200000, 'y') + "\n```\n"; // one minified line, cut to kMaxLiteralLineChars
+    auto const weight = EstimateRenderWeight(Parse(fence));
+    EXPECT_EQ(weight.inlines, 2u);
+}
