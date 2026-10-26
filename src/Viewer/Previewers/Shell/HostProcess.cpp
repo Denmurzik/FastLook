@@ -26,7 +26,9 @@ namespace fastlook::viewer
                     return HANDLE{};
                 }
                 JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
-                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK;
+                // No SILENT_BREAKAWAY_OK: whatever an in-proc handler spawns stays in the job and dies with it. COM LocalServer
+                // handlers (WINWORD/EXCEL) are started by RPCSS, outside this job either way.
+                info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
                 if (!SetInformationJobObject(h, JobObjectExtendedLimitInformation, &info, sizeof(info)))
                 {
                     CloseHandle(h);

@@ -8,7 +8,7 @@
 
 namespace fastlook::core
 {
-    // Env FASTLOOK_UPDATE_API overrides it (tests, local server).
+    // Env FASTLOOK_UPDATE_API overrides it with a local JSON file (tests); URLs are refused there.
     inline constexpr char kReleasesApi[] = "https://api.github.com/repos/Denmurzik/FastLook/releases/latest";
 
     struct ReleaseInfo
