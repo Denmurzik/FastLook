@@ -355,7 +355,6 @@ namespace fastlook::viewer
             host.RefreshChrome();
             auto const rect = core::FitPreviewWindow(DefaultSizeFor(req->ref.path), false, monitor.work, monitor.scale);
             m_visible = true;
-            window->AppWindow().IsShownInSwitchers(true);
             anim::In(host.CurrentWindow(), m_iconRect, rect);
             ForceForeground(window->Hwnd());
             WatchFirstFrame();
@@ -1087,7 +1086,6 @@ namespace fastlook::viewer
                 visual.Opacity(1.0f);
                 visual.Scale({1.0f, 1.0f, 1.0f});
             }
-            window.AppWindow().IsShownInSwitchers(false);
             if (auto* impl = winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(window); impl->IsFullscreen())
             {
                 impl->ToggleFullscreen(); // hidden by now: the next show starts windowed without a flash at the old bounds

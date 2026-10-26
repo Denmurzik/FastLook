@@ -89,7 +89,7 @@ namespace winrt::FastLook::implementation
             presenter.IsMinimizable(false);
             presenter.IsMaximizable(false);
         }
-        // Warm windows stay out of Alt+Tab and the taskbar; the host turns this on while a preview is shown.
+        // Warm windows stay out of Alt+Tab and the taskbar; only a pinned window is shown in them (SetPinned).
         appWindow.IsShownInSwitchers(false);
         appWindow.Changed([this](auto const&, AppWindowChangedEventArgs const& args) {
             // The inset only changes with the presenter (min/max buttons) or the monitor DPI; asking for it on every move/resize
