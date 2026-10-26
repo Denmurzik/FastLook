@@ -1,6 +1,8 @@
 #include "pch.h"
 #include "Modes/Modes.h"
 
+#include <psapi.h>
+
 #include <algorithm>
 #include <memory>
 #include <optional>
@@ -25,6 +27,7 @@ namespace fastlook::viewer
     {
         constexpr wchar_t kInstanceMutex[] = L"Local\\FastLook-Viewer";
         constexpr DWORD kExitWatchdogMs = 2000;
+        constexpr uint64_t kPrivateBytesCeilingMB = 400; // FASTLOOK_MEMORY_CEILING_MB overrides it (tests)
 
         std::optional<uint64_t> EnvNumber(wchar_t const* name)
         {
@@ -51,6 +54,7 @@ namespace fastlook::viewer
             core::LanguagePref appliedLanguage;
             int pinned = 0;
             bool exitStarted = false;
+            bool memoryCeilingHit = false;
             bool stallPending = false; // FASTLOOK_TEST_UI_STALL_MS: stall the UI thread once, on the first `show`
 
             Server(uint64_t idleMs, core::LanguagePref language) : lifecycle(idleMs, Now()), appliedLanguage(language) {}
@@ -79,7 +83,35 @@ namespace fastlook::viewer
 
             void Raise(core::ViewerEvent event)
             {
+                if (event == core::ViewerEvent::PreviewHidden || event == core::ViewerEvent::PinnedClosed)
+                {
+                    CheckMemoryCeiling();
+                }
                 Apply(lifecycle.On(event, Now()));
+            }
+
+            // Safety net: graphics-driver pools and caches only grow with use. Above the ceiling the Viewer restarts at the next
+            // quiet moment, like an idle exit (the daemon starts a fresh one on the next Space or prewarm).
+            void CheckMemoryCeiling()
+            {
+                if (memoryCeilingHit)
+                {
+                    return;
+                }
+                uint64_t const ceilingMB = EnvNumber(L"FASTLOOK_MEMORY_CEILING_MB").value_or(kPrivateBytesCeilingMB);
+                PROCESS_MEMORY_COUNTERS_EX counters{};
+                counters.cb = sizeof(counters);
+                if (!GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&counters), sizeof(counters)))
+                {
+                    return;
+                }
+                uint64_t const privateMB = counters.PrivateUsage / (1024 * 1024);
+                if (privateMB > ceilingMB)
+                {
+                    memoryCeilingHit = true;
+                    FL_LOG_INFO(L"Private Bytes {} MB above the {} MB ceiling; exiting when quiet", privateMB, ceilingMB);
+                    lifecycle.SetExitWhenQuiet();
+                }
             }
 
             void Apply(core::LifecycleAction const& action)
