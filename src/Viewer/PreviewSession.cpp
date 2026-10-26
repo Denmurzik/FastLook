@@ -7,6 +7,8 @@
 #include <string>
 #include <shellscalingapi.h>
 
+#include <winrt/Microsoft.UI.Xaml.Hosting.h>
+
 #include "Diagnostics/Log.h"
 #include "Diagnostics/PerfLog.h"
 #include "FileTypes/ClassifyFile.h"
@@ -1076,6 +1078,15 @@ namespace fastlook::viewer
             }
 
             window.AppWindow().Hide();
+            // Hidden now: bring the content back to rest from the end pose of the close animation. A window left hidden with its
+            // root visual transparent and scaled leaks ~25 KB of composition resources per close (measured); the next show sets
+            // its own start pose anyway.
+            if (auto const content = window.Content())
+            {
+                auto const visual = winrt::Microsoft::UI::Xaml::Hosting::ElementCompositionPreview::GetElementVisual(content);
+                visual.Opacity(1.0f);
+                visual.Scale({1.0f, 1.0f, 1.0f});
+            }
             window.AppWindow().IsShownInSwitchers(false);
             if (auto* impl = winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(window); impl->IsFullscreen())
             {

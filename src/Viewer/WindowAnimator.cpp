@@ -381,6 +381,7 @@ namespace fastlook::viewer::anim
         }
         in.running = false;
         StopPendingIn();
+        uint64_t const generation = in.generation;
 
         auto const visual = RootVisual(window);
         if (!visual || !Enabled() || wasPending)
@@ -394,7 +395,14 @@ namespace fastlook::viewer::anim
         Animate(visual, pose, fromScale, fromOpacity, pose.scale, 0.0f, kOutDuration);
 
         co_await winrt::resume_after(kOutDuration + 20ms);
-        (void)co_await ResumeOn(dq); // false only when the queue is shutting down; the caller hides the window either way
+        // False only when the queue is shutting down; the caller hides the window either way.
+        if (co_await ResumeOn(dq) && Showing().generation == generation) // not shown again meanwhile
+        {
+            // Done: detach the animations before the window hides (the base values already hold the end pose). Animations still
+            // attached to the root visual of a hidden window leak composition resources; the caller restores the pose after Hide.
+            visual.StopAnimation(L"Opacity");
+            visual.StopAnimation(L"Scale");
+        }
     }
 
     void Resize(Window const& window, core::RectI, core::RectI toPx)
