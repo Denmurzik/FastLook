@@ -47,7 +47,8 @@ namespace fastlook::viewer
         }
 
         // Owns every MediaPlayer (see PrepareAsync): a dedicated thread in the multithreaded apartment that runs a message loop.
-        // Started on first use and never stopped (it only waits for messages).
+        // Started on first use and never stopped (it only waits for messages). Work reaches it as messages to a message-only window
+        // of its own: they cannot collide with anybody else's thread messages, and a modal loop on the thread still dispatches them.
         class MediaThread
         {
         public:
@@ -68,8 +69,15 @@ namespace fastlook::viewer
                     bool await_ready() const noexcept { return false; }
                     bool await_suspend(std::coroutine_handle<> handle)
                     {
-                        posted = PostThreadMessageW(thread.m_id, kRun, 0, reinterpret_cast<LPARAM>(handle.address())) != FALSE;
-                        return posted;
+                        // Set before posting: once the message is out, the media thread may resume (and finish) the coroutine
+                        // before PostMessageW returns here, and nothing of the awaiter may be touched after that.
+                        posted = true;
+                        if (!thread.m_window || !PostMessageW(thread.m_window, kRun, 0, reinterpret_cast<LPARAM>(handle.address())))
+                        {
+                            posted = false;
+                            return false;
+                        }
+                        return true;
                     }
                     bool await_resume() const noexcept { return posted; }
                 };
@@ -80,7 +88,7 @@ namespace fastlook::viewer
             bool Post(std::function<void()> work)
             {
                 auto* call = new std::function<void()>(std::move(work));
-                if (PostThreadMessageW(m_id, kCall, 0, reinterpret_cast<LPARAM>(call)))
+                if (m_window && PostMessageW(m_window, kCall, 0, reinterpret_cast<LPARAM>(call)))
                 {
                     return true;
                 }
@@ -92,35 +100,48 @@ namespace fastlook::viewer
             static constexpr UINT kRun = WM_APP + 1;
             static constexpr UINT kCall = WM_APP + 2;
 
+            static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+            {
+                if (message == kRun)
+                {
+                    std::coroutine_handle<>::from_address(reinterpret_cast<void*>(lParam)).resume();
+                    return 0;
+                }
+                if (message == kCall)
+                {
+                    std::unique_ptr<std::function<void()>> const call{reinterpret_cast<std::function<void()>*>(lParam)};
+                    try
+                    {
+                        (*call)();
+                    }
+                    catch (...)
+                    {
+                        FL_LOG_INFO(L"A media thread call failed");
+                    }
+                    return 0;
+                }
+                return DefWindowProcW(hwnd, message, wParam, lParam);
+            }
+
             MediaThread()
             {
                 winrt::handle ready{::CreateEventW(nullptr, TRUE, FALSE, nullptr)};
                 std::thread([this, event = ready.get()] {
                     winrt::init_apartment(winrt::apartment_type::multi_threaded);
-                    MSG msg;
-                    PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE); // creates the queue before anyone posts to it
-                    m_id = GetCurrentThreadId();
+                    WNDCLASSEXW windowClass{sizeof(windowClass)};
+                    windowClass.lpfnWndProc = &WindowProc;
+                    windowClass.hInstance = GetModuleHandleW(nullptr);
+                    windowClass.lpszClassName = L"FastLook.MediaThread";
+                    RegisterClassExW(&windowClass);
+                    m_window = CreateWindowExW(0, windowClass.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, windowClass.hInstance, nullptr);
+                    if (!m_window)
+                    {
+                        FL_LOG_INFO(L"Creating the media thread window failed: {}", GetLastError());
+                    }
                     ::SetEvent(event);
+                    MSG msg;
                     while (GetMessageW(&msg, nullptr, 0, 0) > 0)
                     {
-                        if (msg.hwnd == nullptr && msg.message == kRun)
-                        {
-                            std::coroutine_handle<>::from_address(reinterpret_cast<void*>(msg.lParam)).resume();
-                            continue;
-                        }
-                        if (msg.hwnd == nullptr && msg.message == kCall)
-                        {
-                            std::unique_ptr<std::function<void()>> const call{reinterpret_cast<std::function<void()>*>(msg.lParam)};
-                            try
-                            {
-                                (*call)();
-                            }
-                            catch (...)
-                            {
-                                FL_LOG_INFO(L"A media thread call failed");
-                            }
-                            continue;
-                        }
                         TranslateMessage(&msg);
                         DispatchMessageW(&msg);
                     }
@@ -128,7 +149,7 @@ namespace fastlook::viewer
                 ::WaitForSingleObject(ready.get(), INFINITE);
             }
 
-            DWORD m_id = 0;
+            HWND m_window = nullptr;
         };
 
         // Shared with the MediaPlayer's event handlers, which outlive the coroutine frame when it is cancelled.
@@ -182,21 +203,23 @@ namespace fastlook::viewer
             pending->player = std::move(player);
             pending->source = std::move(source);
             auto finish = [pending] {
-                if (std::exchange(pending->done, true))
+                // Our own reference: removing the Rendering handler and dropping the timer below can release this very closure.
+                auto const keep = pending;
+                if (std::exchange(keep->done, true))
                 {
                     return;
                 }
-                if (pending->rendering)
+                if (keep->rendering)
                 {
-                    CompositionTarget::Rendering(pending->rendering);
+                    CompositionTarget::Rendering(keep->rendering);
                 }
-                if (pending->timer)
+                if (keep->timer)
                 {
-                    pending->timer.Stop();
-                    pending->timer = nullptr; // drops the Tick handler that holds `pending`
+                    keep->timer.Stop();
+                    keep->timer = nullptr; // drops the Tick handler that holds `pending`
                 }
-                auto player = std::move(pending->player);
-                auto source = std::move(pending->source);
+                auto player = std::move(keep->player);
+                auto source = std::move(keep->source);
                 if (!MediaThread::Get().Post([player, source] { ClosePlayer(player, source); }))
                 {
                     ClosePlayer(player, source);
@@ -224,24 +247,42 @@ namespace fastlook::viewer
             }
         }
 
-        // Closes the player on every exit from PrepareAsync that did not hand it over to the previewer.
+        // Closes the player on every exit from PrepareAsync that did not hand it over to the previewer (cancelled, timed out,
+        // failed), on the media thread that created it like a shown player (it was never attached, so there is no frame to wait for).
         struct PlayerGuard
         {
             MediaPlayer player{nullptr};
             winrt::Windows::Media::Core::MediaSource source{nullptr};
             ~PlayerGuard()
             {
+                if (!player && !source)
+                {
+                    return;
+                }
                 try
                 {
                     if (player)
                     {
                         player.Pause();
-                        player.Source(nullptr);
-                        player.Close();
                     }
-                    if (source)
+                }
+                catch (...)
+                {
+                }
+                auto const p = player;
+                auto const s = source;
+                try
+                {
+                    if (!player || !MediaThread::Get().Post([p, s] { ClosePlayer(p, s); }))
                     {
-                        source.Close();
+                        if (player)
+                        {
+                            ClosePlayer(player, source);
+                        }
+                        else if (source)
+                        {
+                            source.Close();
+                        }
                     }
                 }
                 catch (...)
