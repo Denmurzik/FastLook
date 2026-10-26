@@ -82,8 +82,20 @@ $msbuildArgs = @(
 if ($Toolset) { $msbuildArgs += "/p:FastLookToolset=$Toolset" }
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
-& $msbuild @msbuildArgs
-if ($LASTEXITCODE -ne 0) { throw "MSBuild failed with exit code $LASTEXITCODE" }
+# C1076/C3859 = the compiler ran out of PCH heap/virtual memory under commit pressure from other processes. Transient: retry once.
+function Invoke-MSBuild {
+    $lines = [System.Collections.Generic.List[string]]::new()
+    & $msbuild @msbuildArgs 2>&1 | ForEach-Object { $line = "$_"; $lines.Add($line); Write-Host $line }
+    [pscustomobject]@{ ExitCode = $LASTEXITCODE; PchMemory = [bool]($lines | Where-Object { $_ -match '(C1076|C3859)' }) }
+}
+
+$result = Invoke-MSBuild
+if ($result.ExitCode -ne 0 -and $result.PchMemory) {
+    Write-Host 'MSVC C1076/C3859 (PCH memory under commit pressure): retrying the build once'
+    Start-Sleep -Seconds 10
+    $result = Invoke-MSBuild
+}
+if ($result.ExitCode -ne 0) { throw "MSBuild failed with exit code $($result.ExitCode)" }
 $sw.Stop()
 
 $outDir = Join-Path $repo "out\bin\$Configuration"
