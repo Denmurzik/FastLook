@@ -1,10 +1,9 @@
 #include "HookThread.h"
 
-#include <algorithm>
 #include <atomic>
 #include <cstdint>
-#include <iterator>
 #include <cstdlib>
+#include <iterator>
 #include <string>
 
 #include "../DaemonApp.h"
@@ -15,51 +14,51 @@
 
 namespace fastlook::daemon
 {
-    // Fixed size, so recording never allocates: 1 us buckets, the last one collects everything >= kBuckets - 1; the exact
-    // maximum is kept separately.
-    struct Histogram
-    {
-        static constexpr uint32_t kBuckets = 256;
-        uint32_t bucket[kBuckets]{};
-        uint32_t count = 0;
-        uint32_t maxUs = 0;
-
-        void Record(uint32_t us) noexcept
-        {
-            ++bucket[us < kBuckets ? us : kBuckets - 1];
-            ++count;
-            maxUs = us > maxUs ? us : maxUs;
-        }
-
-        // Smallest bucket (in us) holding the given fraction of the samples; 0 without samples. With fewer than 1000 samples
-        // p99 is the maximum bucket: read it together with `count`.
-        uint32_t Percentile(uint32_t permille) const noexcept
-        {
-            if (count == 0)
-            {
-                return 0;
-            }
-            uint64_t const need = (static_cast<uint64_t>(count) * permille + 999) / 1000;
-            uint64_t seen = 0;
-            for (uint32_t i = 0; i < kBuckets; ++i)
-            {
-                seen += bucket[i];
-                if (seen >= need)
-                {
-                    return i;
-                }
-            }
-            return kBuckets - 1;
-        }
-
-        void Reset() noexcept
-        {
-            *this = Histogram{};
-        }
-    };
-
     struct HookThread::Context
     {
+        // Fixed size, so recording never allocates: 1 us buckets, the last one collects everything >= kBuckets - 1; the exact
+        // maximum is kept separately.
+        struct Histogram
+        {
+            static constexpr uint32_t kBuckets = 256;
+            uint32_t bucket[kBuckets]{};
+            uint32_t count = 0;
+            uint32_t maxUs = 0;
+
+            void Record(uint32_t us) noexcept
+            {
+                ++bucket[us < kBuckets ? us : kBuckets - 1];
+                ++count;
+                maxUs = us > maxUs ? us : maxUs;
+            }
+
+            // Smallest bucket (in us) holding the given fraction of the samples; 0 without samples. With fewer than 1000 samples
+            // p99 is the maximum bucket: read it together with `count`.
+            uint32_t Percentile(uint32_t permille) const noexcept
+            {
+                if (count == 0)
+                {
+                    return 0;
+                }
+                uint64_t const need = (static_cast<uint64_t>(count) * permille + 999) / 1000;
+                uint64_t seen = 0;
+                for (uint32_t i = 0; i < kBuckets; ++i)
+                {
+                    seen += bucket[i];
+                    if (seen >= need)
+                    {
+                        return i;
+                    }
+                }
+                return kBuckets - 1;
+            }
+
+            void Reset() noexcept
+            {
+                *this = Histogram{};
+            }
+        };
+
         ~Context()
         {
             if (ready)
@@ -76,6 +75,7 @@ namespace fastlook::daemon
         // (ProbeFocus + Decide), the one the 50 us budget is really about.
         Histogram all;
         Histogram space;
+        Histogram explorer; // the subset of `space` where the foreground was Explorer/Desktop, i.e. the full GetGUIThreadInfo probe ran
         Histogram trigger; // the subset of `space` that ended in a Trigger (adds the PostMessage)
         std::atomic<bool> abandoned{false};
         std::atomic<DWORD> threadId{0};
@@ -88,6 +88,7 @@ namespace fastlook::daemon
         // Modifier keys as seen by the hook, one bit per physical key (hook thread only): saves five GetAsyncKeyState syscalls per Space. Re-synced from the
         // real keyboard state on install, reset and every heartbeat, so a lost event is healed within a second.
         uint8_t mods = 0;
+        uint32_t lastKeyTickMs = 0; // ll.time of the last hooked key: the resync must not race a key whose async state is not final yet
     };
 
     namespace
@@ -109,6 +110,7 @@ namespace fastlook::daemon
         constexpr DWORD kStopWaitMs = 2000;
         // The filter heals a lost key-up after 1500 ms; ours must never be the longer one.
         constexpr uint32_t kSpaceStaleMs = 1000;
+        constexpr uint32_t kResyncQuietMs = 500; // modifier resync only after this long without a hooked key
         constexpr WORD kAltFixVk = 0xE8; // unassigned: cancels the menu-bar activation on Alt release
 
         constexpr uint32_t kPausedBit = 0x200;
@@ -180,16 +182,35 @@ namespace fastlook::daemon
             return m;
         }
 
-        void TrackModifier(Context& ctx, uint32_t vk, bool down) noexcept
+        // Physical keys reach the hook as the left/right VKs, but remappers (PowerToys Keyboard Manager, AutoHotkey, macro
+        // tools) inject the neutral VK_SHIFT/VK_CONTROL/VK_MENU: those map to the left or right bit like the system does.
+        int ModifierIndex(KBDLLHOOKSTRUCT const& ll) noexcept
         {
+            bool const right = (ll.flags & LLKHF_EXTENDED) != 0;
+            switch (ll.vkCode)
+            {
+            case VK_CONTROL: return right ? 1 : 0;
+            case VK_MENU: return right ? 3 : 2;
+            case VK_SHIFT: return ll.scanCode == 0x36 ? 5 : 4;
+            default: break;
+            }
             for (size_t i = 0; i < std::size(kModKeys); ++i)
             {
-                if (static_cast<uint32_t>(kModKeys[i]) == vk)
+                if (static_cast<uint32_t>(kModKeys[i]) == ll.vkCode)
                 {
-                    uint8_t const bit = static_cast<uint8_t>(1u << i);
-                    ctx.mods = down ? static_cast<uint8_t>(ctx.mods | bit) : static_cast<uint8_t>(ctx.mods & ~bit);
-                    return;
+                    return static_cast<int>(i);
                 }
+            }
+            return -1;
+        }
+
+        void TrackModifier(Context& ctx, KBDLLHOOKSTRUCT const& ll, bool down) noexcept
+        {
+            int const i = ModifierIndex(ll);
+            if (i >= 0)
+            {
+                uint8_t const bit = static_cast<uint8_t>(1u << i);
+                ctx.mods = down ? static_cast<uint8_t>(ctx.mods | bit) : static_cast<uint8_t>(ctx.mods & ~bit);
             }
         }
 
@@ -208,7 +229,8 @@ namespace fastlook::daemon
             uint64_t const t0 = Qpc();
 
             bool const down = wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN;
-            TrackModifier(*ctx, ll.vkCode, down);
+            TrackModifier(*ctx, ll, down);
+            ctx->lastKeyTickMs = ll.time;
 
             // Decide() only looks at Space and at type-ahead keydowns: everything else passes without any further syscall.
             if (ll.vkCode != VK_SPACE)
@@ -269,6 +291,10 @@ namespace fastlook::daemon
             if (focusPtr)
             {
                 ctx->space.Record(us);
+                if (focus.fg == core::hook::ForegroundKind::Explorer || focus.fg == core::hook::ForegroundKind::Desktop)
+                {
+                    ctx->explorer.Record(us);
+                }
                 if (verdict == core::hook::HookVerdict::Trigger)
                 {
                     ctx->trigger.Record(us);
@@ -341,13 +367,15 @@ namespace fastlook::daemon
                 return;
             }
             FL_LOG_INFO(L"hook installed hook_cb_max_us={} hook_cb_p50_us={} hook_cb_p99_us={} hook_cb_count={} hook_space_max_us={} "
-                        L"hook_space_p50_us={} hook_space_p99_us={} hook_space_count={} hook_trigger_max_us={} hook_trigger_p50_us={} hook_trigger_count={}",
+                        L"hook_space_p50_us={} hook_space_p99_us={} hook_space_count={} hook_trigger_max_us={} hook_trigger_p50_us={} hook_trigger_count={} hook_explorer_max_us={} hook_explorer_p50_us={} hook_explorer_p99_us={} hook_explorer_count={}",
                         ctx.all.maxUs, ctx.all.Percentile(500), ctx.all.Percentile(990), ctx.all.count, ctx.space.maxUs,
                         ctx.space.Percentile(500), ctx.space.Percentile(990), ctx.space.count, ctx.trigger.maxUs, ctx.trigger.Percentile(500),
-                        ctx.trigger.count);
+                        ctx.trigger.count, ctx.explorer.maxUs, ctx.explorer.Percentile(500), ctx.explorer.Percentile(990),
+                        ctx.explorer.count);
             ctx.all.Reset();
             ctx.space.Reset();
             ctx.trigger.Reset();
+            ctx.explorer.Reset();
         }
 
         // Alt+Space was swallowed: a tagged unassigned key between Alt down and up stops Explorer showing its menu bar on Alt release.
@@ -402,7 +430,10 @@ namespace fastlook::daemon
                     if (msg.wParam == heartbeatTimer)
                     {
                         ctx.heartbeatMs = NowMs();
-                        ctx.mods = ReadModifiers();
+                        if (GetTickCount() - ctx.lastKeyTickMs >= kResyncQuietMs)
+                        {
+                            ctx.mods = ReadModifiers();
+                        }
                         if (!ctx.hook.load() && !Unpack(ctx.config.load()).paused)
                         {
                             InstallHook(ctx, true); // an earlier install failed: do not wait for the 60 s timer

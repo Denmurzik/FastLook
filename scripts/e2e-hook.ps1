@@ -644,6 +644,15 @@ try {
         Tap $VK.Esc; Pause 300
 
         Begin-Section
+        # ---- 5b. neutral Ctrl (as injected by remappers) + Space is Ctrl+Space, not Space ----
+        $null = Focus-Explorer $explorerWin $aName
+        Chord 0x11 $VK.Space -List               # VK_CONTROL (neutral), not VK_LCONTROL
+        $nv = Wait-ViewerVisible 900
+        Check 'modifiers: neutral VK_CONTROL + Space (remapper style) does not open the preview' (-not $nv)
+        if ($nv) { Close-Preview }
+        Pause 300
+
+        Begin-Section
         # ---- 6. type-ahead (Latin) ----
         $null = Focus-Explorer $explorerWin $aName
         Pause 1300
@@ -777,7 +786,7 @@ try {
 
         Begin-Section
         # ---- 10. hook callback time: force a rehook via TaskbarCreated to flush the stat ----
-        function Read-CbStats { @([regex]::Matches((LogText), 'hook installed hook_cb_max_us=(\d+) hook_cb_p50_us=(\d+) hook_cb_p99_us=(\d+) hook_cb_count=(\d+) hook_space_max_us=(\d+) hook_space_p50_us=(\d+) hook_space_p99_us=(\d+) hook_space_count=(\d+)(?: hook_trigger_max_us=(\d+) hook_trigger_p50_us=(\d+) hook_trigger_count=(\d+))?') | ForEach-Object { [pscustomobject]@{ Max = [int]$_.Groups[1].Value; P50 = [int]$_.Groups[2].Value; P99 = [int]$_.Groups[3].Value; Count = [int]$_.Groups[4].Value; SMax = [int]$_.Groups[5].Value; SP50 = [int]$_.Groups[6].Value; SP99 = [int]$_.Groups[7].Value; SCount = [int]$_.Groups[8].Value; TMax = [int]$_.Groups[9].Value; TP50 = [int]$_.Groups[10].Value; TCount = [int]$_.Groups[11].Value } }) }
+        function Read-CbStats { @([regex]::Matches((LogText), 'hook installed hook_cb_max_us=(\d+) hook_cb_p50_us=(\d+) hook_cb_p99_us=(\d+) hook_cb_count=(\d+) hook_space_max_us=(\d+) hook_space_p50_us=(\d+) hook_space_p99_us=(\d+) hook_space_count=(\d+)(?: hook_trigger_max_us=(\d+) hook_trigger_p50_us=(\d+) hook_trigger_count=(\d+))?(?: hook_explorer_max_us=(\d+) hook_explorer_p50_us=(\d+) hook_explorer_p99_us=(\d+) hook_explorer_count=(\d+))?') | ForEach-Object { [pscustomobject]@{ Max = [int]$_.Groups[1].Value; P50 = [int]$_.Groups[2].Value; P99 = [int]$_.Groups[3].Value; Count = [int]$_.Groups[4].Value; SMax = [int]$_.Groups[5].Value; SP50 = [int]$_.Groups[6].Value; SP99 = [int]$_.Groups[7].Value; SCount = [int]$_.Groups[8].Value; TMax = [int]$_.Groups[9].Value; TP50 = [int]$_.Groups[10].Value; TCount = [int]$_.Groups[11].Value; EMax = [int]$_.Groups[12].Value; EP50 = [int]$_.Groups[13].Value; EP99 = [int]$_.Groups[14].Value; ECount = [int]$_.Groups[15].Value } }) }
         # -Since: install-line index the round started at (the 60 s timer rehook may flush part of a round before this call).
         function Flush-CbStat([int]$Since = -1) {
             $n = (Read-CbStats).Count
@@ -792,6 +801,7 @@ try {
                 Max = ($new | Measure-Object -Property Max -Maximum).Maximum; P50 = $big.P50; P99 = ($new | Measure-Object -Property P99 -Maximum).Maximum; Count = ($new | Measure-Object -Property Count -Sum).Sum
                 SMax = ($new | Measure-Object -Property SMax -Maximum).Maximum; SP50 = $sbig.SP50; SP99 = ($new | Measure-Object -Property SP99 -Maximum).Maximum; SCount = ($new | Measure-Object -Property SCount -Sum).Sum
                 TMax = ($new | Measure-Object -Property TMax -Maximum).Maximum; TP50 = ($new | Sort-Object TCount -Descending | Select-Object -First 1).TP50; TCount = ($new | Measure-Object -Property TCount -Sum).Sum
+                EMax = ($new | Measure-Object -Property EMax -Maximum).Maximum; EP50 = ($new | Sort-Object ECount -Descending | Select-Object -First 1).EP50; EP99 = ($new | Measure-Object -Property EP99 -Maximum).Maximum; ECount = ($new | Measure-Object -Property ECount -Sum).Sum
             }
         }
         $loaded = Flush-CbStat          # whole run since the previous install (busy: this script was spinning)
@@ -831,11 +841,11 @@ try {
         $quietMax = if ($quiet -and $quiet2) { [Math]::Max($quiet.Max, $quiet2.Max) } else { $null }
         $quietN = if ($quiet -and $quiet2) { $quiet.Count + $quiet2.Count } else { 0 }
         $script:HookCb = [ordered]@{
-            space = [ordered]@{ p50 = $spaceStat.SP50; p99 = $spaceStat.SP99; max = $spaceStat.SMax; n = $spaceStat.SCount; cycles = $spaceCycles }
+            space = [ordered]@{ p50 = $spaceStat.SP50; p99 = $spaceStat.SP99; max = $spaceStat.SMax; n = $spaceStat.SCount; cycles = $spaceCycles; explorer = [ordered]@{ p50 = $spaceStat.EP50; p99 = $spaceStat.EP99; max = $spaceStat.EMax; n = $spaceStat.ECount } }
             otherKeys = [ordered]@{ p99 = $quietP99; max = $quietMax; n = $quietN }
             wholeRun = [ordered]@{ max = $(if ($loaded) { $loaded.Max } else { $null }); p99 = $(if ($loaded) { $loaded.P99 } else { $null }); spaceMax = $(if ($loaded) { $loaded.SMax } else { $null }); spaceP99 = $(if ($loaded) { $loaded.SP99 } else { $null }) }
         }
-        Check 'hook callback: Space path p99 <= 250 us (lead ruling; GetGUIThreadInfo stays live; quiet: Space opens/closes the preview, Space in the address-bar Edit; max is reported, it may include preemption)' ($spaceStat -and $spaceStat.SCount -ge 100 -and $spaceStat.SP99 -le 250) ("(p50={0} p99={1} max={2} us, n={3} fresh Space keydowns, {4} open/close cycles; Trigger subset p50={5} max={6} us n={7}; p99 is only a real percentile for n > 100)" -f $spaceStat.SP50, $spaceStat.SP99, $spaceStat.SMax, $spaceStat.SCount, $spaceCycles, $spaceStat.TP50, $spaceStat.TMax, $spaceStat.TCount)
+        Check 'hook callback: Space path p99 <= 250 us (lead ruling; GetGUIThreadInfo stays live; quiet: Space opens/closes the preview, Space in the address-bar Edit; max is reported, it may include preemption)' ($spaceStat -and $spaceStat.SCount -ge 100 -and $spaceStat.SP99 -le 250) ("(p50={0} p99={1} max={2} us, n={3} fresh Space keydowns, {4} open/close cycles; Trigger subset p50={5} max={6} us n={7}; Explorer-foreground subset (full GetGUIThreadInfo probe) p50={8} p99={9} max={10} us n={11}; p99 is only a real percentile for n > 100)" -f $spaceStat.SP50, $spaceStat.SP99, $spaceStat.SMax, $spaceStat.SCount, $spaceCycles, $spaceStat.TP50, $spaceStat.TMax, $spaceStat.TCount, $spaceStat.EP50, $spaceStat.EP99, $spaceStat.EMax, $spaceStat.ECount)
         Check 'hook callback: other keys p99 <= 50 us (quiet: 2 x 20 x F15 + A, 40-60 ms apart)' ($null -ne $quietP99 -and $quietP99 -le 50) ("(p99={0} us, max={1} us, n={2}; round 1 p50/p99/max={3}/{4}/{5} n={6}, round 2 p50/p99/max={7}/{8}/{9} n={10})" -f $quietP99, $quietMax, $quietN, $quiet.P50, $quiet.P99, $quiet.Max, $quiet.Count, $quiet2.P50, $quiet2.P99, $quiet2.Max, $quiet2.Count)
 
         Begin-Section
