@@ -4,7 +4,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <coroutine>
 #include <cwctype>
+#include <thread>
 
 #include <winrt/Windows.UI.Text.h>
 
@@ -41,6 +43,65 @@ namespace fastlook::viewer
             }
             return false;
         }
+
+        // Owns every MediaPlayer (see PrepareAsync): a dedicated thread in the multithreaded apartment that runs a message loop.
+        // Started on first use and never stopped (it only waits for messages).
+        class MediaThread
+        {
+        public:
+            static MediaThread& Get()
+            {
+                static auto* const thread = new MediaThread; // intentionally leaked, like the other process-lifetime statics
+                return *thread;
+            }
+
+            // `co_await MediaThread::Get().Resume()` continues the coroutine on the media thread; yields false (and continues in
+            // place) when the thread could not take the work.
+            auto Resume()
+            {
+                struct Awaiter
+                {
+                    MediaThread& thread;
+                    bool posted = false;
+                    bool await_ready() const noexcept { return false; }
+                    bool await_suspend(std::coroutine_handle<> handle)
+                    {
+                        posted = PostThreadMessageW(thread.m_id, kRun, 0, reinterpret_cast<LPARAM>(handle.address())) != FALSE;
+                        return posted;
+                    }
+                    bool await_resume() const noexcept { return posted; }
+                };
+                return Awaiter{*this};
+            }
+
+        private:
+            static constexpr UINT kRun = WM_APP + 1;
+
+            MediaThread()
+            {
+                winrt::handle ready{::CreateEventW(nullptr, TRUE, FALSE, nullptr)};
+                std::thread([this, event = ready.get()] {
+                    winrt::init_apartment(winrt::apartment_type::multi_threaded);
+                    MSG msg;
+                    PeekMessageW(&msg, nullptr, WM_USER, WM_USER, PM_NOREMOVE); // creates the queue before anyone posts to it
+                    m_id = GetCurrentThreadId();
+                    ::SetEvent(event);
+                    while (GetMessageW(&msg, nullptr, 0, 0) > 0)
+                    {
+                        if (msg.hwnd == nullptr && msg.message == kRun)
+                        {
+                            std::coroutine_handle<>::from_address(reinterpret_cast<void*>(msg.lParam)).resume();
+                            continue;
+                        }
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }).detach();
+                ::WaitForSingleObject(ready.get(), INFINITE);
+            }
+
+            DWORD m_id = 0;
+        };
 
         // Shared with the MediaPlayer's event handlers, which outlive the coroutine frame when it is cancelled.
         struct OpenState
@@ -144,6 +205,17 @@ namespace fastlook::viewer
             throw PreviewError{std::wstring{Str(L"Common", notFound ? L"NotFound" : L"PreviewFailed")}, std::nullopt};
         }
 
+        // The player is created on the media thread: one created on a thread-pool thread (where the file open resumes) leaves a
+        // hidden window, its audio-state monitor and two handles behind on every open, because that thread pumps no messages.
+        // A thread of our own rather than the UI thread: the open stays off the thread that animates the window.
+        if (!co_await MediaThread::Get().Resume())
+        {
+            throw PreviewError{std::wstring{Str(L"Common", L"PreviewFailed")}, std::nullopt};
+        }
+        if (cancel())
+        {
+            co_return;
+        }
         guard.player = MediaPlayer{};
         guard.player.AutoPlay(false);
         guard.player.MediaOpened([state](auto const&, auto const&) { state->Set(); });
