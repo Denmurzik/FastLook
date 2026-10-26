@@ -8,6 +8,10 @@
   Each step's console output goes to out/perf/<step>.log, its JSON to out/perf/<step>.json; the rows and all values go to
   out/perf-acceptance.json, rewritten after EVERY step, so a killed run still leaves the finished rows behind.
 
+  Bench memory rows (task 34, lead ruling): the acceptance row is the growth of FastLook's own memory (heap busy bytes, summed
+  over the 50-open intervals without a graphics-driver pool step) with the window really closing between opens; the graphics driver's pool (D3DKMT)
+  is reported in an INFO row. INFO rows never fail the run.
+
   Honesty rules: before a step runs its JSON is deleted; a step that throws, exits non-zero (ram, bench, video) or leaves no JSON
   gives "not measured" (= FAIL), never an earlier run's numbers. Steps not selected (-Only / -Skip) read the JSON stored by an
   earlier run on purpose (that is how a run in parts is assembled). Each step waits for >= 2 GB of free RAM (up to 10 min), else
@@ -91,15 +95,41 @@ function Num($x) { if ($null -eq $x -or "$x" -eq '') { $null } else { [double]$x
 function Growth($d) {
     if ($d -and $null -ne $d.privateBytesEndMB -and $null -ne $d.privateBytesAt100MB) { [math]::Round([double]$d.privateBytesEndMB - [double]$d.privateBytesAt100MB, 2) } else { $null }
 }
+# Bench memory split (lead ruling, task 34): "own" = heap busy bytes (what FastLook allocates); "driver" = the graphics kernel's
+# count of this process's GPU allocations in system memory (D3DKMT), which the Intel user-mode driver backs with private memory and
+# keeps in pools that grow in steps. The private commit outside the heaps moves with the driver and is reported. The driver also
+# keeps bookkeeping in the process heap that grows with each pool step, so own growth is summed only over the 50-open intervals
+# without a driver step (> 1 MB); the raw growth and the growth inside step intervals are reported. $null when the bench JSON has
+# no split (older Viewer) or a sample is missing.
+function Split-Growth($d) {
+    if (-not $d -or $null -eq $d.series -or $null -eq $d.ownAt100MB -or $null -eq $d.ownEndMB -or $null -eq $d.driverEndMB) { return $null }
+    $pts = @($d.series | Where-Object { $_.i -ge 100 } | Sort-Object i)
+    if ($pts.Count -eq 0) { return $null }
+    $pts += [pscustomobject]@{ i = [int]$d.iterations + 1; ownMB = [double]$d.ownEndMB; driverMB = [double]$d.driverEndMB }
+    $own = 0.0; $ownInSteps = 0.0; $stepMB = 0.0; $steps = 0; $driverRest = 0.0
+    for ($k = 1; $k -lt $pts.Count; $k++) {
+        $dOwn = [double]$pts[$k].ownMB - [double]$pts[$k - 1].ownMB
+        $dDrv = [double]$pts[$k].driverMB - [double]$pts[$k - 1].driverMB
+        if ([math]::Abs($dDrv) -gt 1) { $ownInSteps += $dOwn; $stepMB += $dDrv; $steps++ } else { $own += $dOwn; $driverRest += $dDrv }
+    }
+    [pscustomobject]@{
+        own = [math]::Round($own, 2); ownInSteps = [math]::Round($ownInSteps, 2)
+        driver = [math]::Round([double]$d.driverEndMB - [double]$d.driverAt100MB, 2); driverSteps = $steps; driverStepMB = [math]::Round($stepMB, 2)
+        driverRest = [math]::Round($driverRest, 2); handles = [int]$d.handlesEnd - [int]$d.handlesAt100; privateBytes = Growth $d
+        ownRaw = [math]::Round([double]$d.ownEndMB - [double]$d.ownAt100MB, 2); intervals = $pts.Count - 1
+        nonHeap = if ($null -ne $d.nonHeapEndMB -and $null -ne $d.nonHeapAt100MB) { [math]::Round([double]$d.nonHeapEndMB - [double]$d.nonHeapAt100MB, 2) } else { $null }
+    }
+}
 
 function Build-Rows {
     $smoke = Get-StepData 'smoke'; $ram = Get-StepData 'ram'; $bench = Get-StepData 'bench'
     $video = Get-StepData 'video'; $e2e = Get-StepData 'e2e'; $cold = Get-StepData 'cold'
     $rows = [System.Collections.Generic.List[object]]::new()
     # $Value: number/text or $null (not measured). $Test gets the value. $Manual rows never fail.
-    function Add-Row([string]$Metric, $Value, [string]$Target, [scriptblock]$Test, [string]$Source, [switch]$Manual, [string]$Detail = '') {
+    function Add-Row([string]$Metric, $Value, [string]$Target, [scriptblock]$Test, [string]$Source, [switch]$Manual, [switch]$Info, [string]$Detail = '') {
         $status = 'FAIL'; $shown = 'not measured'
         if ($Manual) { $status = 'MANUAL'; $shown = 'release checklist' }
+        elseif ($Info) { $status = 'INFO'; if ($null -ne $Value -and "$Value" -ne '') { $shown = if ($Value -is [double]) { '{0:n1}' -f $Value } else { "$Value" } } }
         elseif ($null -ne $Value -and "$Value" -ne '') {
             $shown = if ($Value -is [double] -or $Value -is [float]) { '{0:n1}' -f $Value } else { "$Value" }
             $status = if (& $Test $Value) { 'PASS' } else { 'FAIL' }
@@ -120,7 +150,11 @@ function Build-Rows {
     Add-Row 'Space -> text rendered (warm) p50, ms' (Num $e2e.warmContentMs.text.p50) '<= 150' { param($v) $v -le 150 } 'e2e'
     Add-Row 'Space -> window (cold) p50, ms' (Num $cold.coldWindowMs.p50) '<= 400' { param($v) $v -le 400 } 'e2e -Cold'
     Add-Row '24 MP photo, MB (daemon + Viewer)' (Num $ram.photoMB) '<= 120' { param($v) $v -le 120 } 'measure-ram'
-    Add-Row ('{0} opens: Private Bytes growth (100 -> end), MB' -f $BenchIterations) (Num (Growth $bench)) '<= 2' { param($v) $v -le 2 } 'bench'
+    $bs = Split-Growth $bench
+    $bsOwnDetail = if ($bs) { "raw {0} MB, of it {1} MB in the {2} of {3} intervals with a driver step (driver bookkeeping in the process heap); non-heap private commit {4} MB; handles {5:+#;-#;0}; Private Bytes {6} MB" -f $bs.ownRaw, $bs.ownInSteps, $bs.driverSteps, $bs.intervals, $bs.nonHeap, $bs.handles, $bs.privateBytes } else { '' }
+    Add-Row ('{0} opens: own memory growth (heap busy, 100 -> end, outside driver steps), MB' -f $BenchIterations) (Num $bs.own) '<= 2' { param($v) $v -le 2 } 'bench' -Detail $bsOwnDetail
+    $bsDrvDetail = if ($bs) { "{0} step(s) of +{1} MB in total; outside the steps {2} MB" -f $bs.driverSteps, $bs.driverStepMB, $bs.driverRest } else { '' }
+    Add-Row ('{0} opens: graphics driver pool growth (D3DKMT, 100 -> end), MB' -f $BenchIterations) (Num $bs.driver) 'reported (bounded)' { $true } 'bench' -Info -Detail $bsDrvDetail
     $failShown = if ($bench) { "{0} / {1}" -f $bench.failures, $(if ((Get-ExitText 'bench') -eq 'stored') { 0 } else { Get-ExitText 'bench' }) } else { $null }
     Add-Row ('{0} opens: failures / exit code' -f $BenchIterations) $failShown '0 / 0' { $bench.failures -eq 0 -and $failShown -eq '0 / 0' } 'bench'
     Add-Row ('{0} spaces: missed / crashes' -f $E2EIterations) $(if ($e2e) { "{0} / {1}" -f $e2e.missed, $e2e.crashes } else { $null }) '0 / 0' { $e2e.missed -eq 0 -and $e2e.crashes -eq 0 } 'e2e'
@@ -132,7 +166,11 @@ function Build-Rows {
     Add-Row 'Hook callback right after daemon trim p99, us' (Num $ram.hookAfterTrimUs.p99) '<= 50 (weak: F15 only, n small)' { param($v) $v -le 50 } 'measure-ram'
     Add-Row 'Warm-idle after daemon trim, MB (12 s after close)' (Num $ram.warmAfterTrimMB) '<= 25' { param($v) $v -le 25 } 'measure-ram'
     Add-Row 'After video preview + trim, MB (daemon + Viewer)' (Num $ram.videoAfterTrimMB) '<= 25' { param($v) $v -le 25 } 'measure-ram'
-    Add-Row ('Repeated video opens ({0}): Private Bytes growth (100 -> end), MB' -f $VideoIterations) (Num (Growth $video)) '<= 2' { param($v) $v -le 2 } 'bench (video)'
+    $vs = Split-Growth $video
+    $vsOwnDetail = if ($vs) { "raw {0} MB, of it {1} MB in the {2} of {3} intervals with a driver step; non-heap private commit {4} MB; handles {5:+#;-#;0}; Private Bytes {6} MB" -f $vs.ownRaw, $vs.ownInSteps, $vs.driverSteps, $vs.intervals, $vs.nonHeap, $vs.handles, $vs.privateBytes } else { '' }
+    Add-Row ('Repeated video opens ({0}): own memory growth (heap busy, outside driver steps), MB' -f $VideoIterations) (Num $vs.own) '<= 2' { param($v) $v -le 2 } 'bench (video)' -Detail $vsOwnDetail
+    $vsDrvDetail = if ($vs) { "{0} step(s) of +{1} MB in total; outside the steps {2} MB" -f $vs.driverSteps, $vs.driverStepMB, $vs.driverRest } else { '' }
+    Add-Row ('Repeated video opens ({0}): graphics driver pool growth (D3DKMT), MB' -f $VideoIterations) (Num $vs.driver) 'reported (bounded)' { $true } 'bench (video)' -Info -Detail $vsDrvDetail
     Add-Row 'Repeated video opens: failures' (Num $video.failures) '0' { param($v) $v -eq 0 } 'bench (video)'
     Add-Row '24 MP + 24 MP neighbours, MB (Viewer + cold daemon)' (Num $ram.neighboursTotalMB) '<= 120' { param($v) $v -le 120 } 'measure-ram'
     Add-Row 'anim_start while neighbours decode, max ms' (Num $ram.animStartMs.max) '<= 50 (derived)' { param($v) $v -le 50 } 'measure-ram'
