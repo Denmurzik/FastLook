@@ -68,7 +68,9 @@ namespace fastlook::core
             m_trimDue = 0;
         }
         // Before the first PrewarmDone (a cold start can take longer than the idle time) only an explicit exit request counts.
-        if (Quiet() && (m_exitWhenQuiet || (m_idleStarted && m_idleMs && nowMs - m_idleSince >= m_idleMs)))
+        // That request is honoured on a Tick only, once quiet for kQuietExitDelayMs (m_idleSince = when it last became quiet).
+        bool const requested = m_exitWhenQuiet && event == ViewerEvent::Tick && nowMs - m_idleSince >= kQuietExitDelayMs;
+        if (Quiet() && (requested || (m_idleStarted && m_idleMs && nowMs - m_idleSince >= m_idleMs)))
         {
             action.exitNow = true;
         }

@@ -106,7 +106,43 @@ TEST(Lifecycle, ExitWhenQuiet)
     l.On(ViewerEvent::PreviewShown, 0);
     l.SetExitWhenQuiet();
     EXPECT_FALSE(l.On(ViewerEvent::Tick, 100).exitNow);
-    EXPECT_TRUE(l.On(ViewerEvent::PreviewHidden, 200).exitNow);
+    // Never inside the close itself: the closed previewer may still be releasing (ordered media close).
+    EXPECT_FALSE(l.On(ViewerEvent::PreviewHidden, 200).exitNow);
+    EXPECT_FALSE(l.On(ViewerEvent::Tick, 200 + kQuietExitDelayMs - 1).exitNow);
+    EXPECT_TRUE(l.On(ViewerEvent::Tick, 200 + kQuietExitDelayMs).exitNow);
+}
+
+TEST(Lifecycle, ExitWhenQuietWaitsForAQuietTickAfterAReopen)
+{
+    Lifecycle l(0, 0);
+    l.On(ViewerEvent::PrewarmDone, 0);
+    l.SetExitWhenQuiet();
+    l.On(ViewerEvent::PreviewShown, 100);
+    EXPECT_FALSE(l.On(ViewerEvent::PreviewHidden, 200).exitNow);
+    l.On(ViewerEvent::PreviewShown, 500); // reopened within the delay
+    EXPECT_FALSE(l.On(ViewerEvent::Tick, 200 + kQuietExitDelayMs).exitNow);
+    EXPECT_FALSE(l.On(ViewerEvent::PreviewHidden, 2000).exitNow);
+    EXPECT_FALSE(l.On(ViewerEvent::Tick, 2000 + kQuietExitDelayMs - 1).exitNow);
+    EXPECT_TRUE(l.On(ViewerEvent::Tick, 2000 + kQuietExitDelayMs).exitNow);
+}
+
+TEST(Lifecycle, ExitWhenQuietWaitsForPinnedWindows)
+{
+    Lifecycle l(0, 0);
+    l.On(ViewerEvent::PrewarmDone, 0);
+    l.On(ViewerEvent::PinnedOpened, 10);
+    l.SetExitWhenQuiet();
+    EXPECT_FALSE(l.On(ViewerEvent::Tick, 5000).exitNow);
+    EXPECT_FALSE(l.On(ViewerEvent::PinnedClosed, 6000).exitNow);
+    EXPECT_TRUE(l.On(ViewerEvent::Tick, 6000 + kQuietExitDelayMs).exitNow);
+}
+
+TEST(Lifecycle, ExitWhenQuietWhileAlreadyQuietExitsOnTheNextTick)
+{
+    Lifecycle l(0, 0);
+    l.On(ViewerEvent::PrewarmDone, 0);
+    l.SetExitWhenQuiet();
+    EXPECT_TRUE(l.On(ViewerEvent::Tick, 5000).exitNow);
 }
 
 TEST(Lifecycle, PinnedJumpsBlockUntilEveryWindowClosed)

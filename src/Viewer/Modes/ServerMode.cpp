@@ -28,7 +28,6 @@ namespace fastlook::viewer
         constexpr wchar_t kInstanceMutex[] = L"Local\\FastLook-Viewer";
         constexpr DWORD kExitWatchdogMs = 2000;
         constexpr uint64_t kPrivateBytesCeilingMB = 400; // FASTLOOK_MEMORY_CEILING_MB overrides it (tests)
-        constexpr uint64_t kCeilingExitDelayMs = 1000;   // > the media close delay (100 ms) plus a frame
 
         std::optional<uint64_t> EnvNumber(wchar_t const* name)
         {
@@ -56,7 +55,6 @@ namespace fastlook::viewer
             int pinned = 0;
             bool exitStarted = false;
             bool memoryCeilingHit = false;
-            uint64_t ceilingExitDue = 0; // GetTickCount64 time from which a Tick arms the ceiling exit; 0 = none
             bool stallPending = false; // FASTLOOK_TEST_UI_STALL_MS: stall the UI thread once, on the first `show`
 
             Server(uint64_t idleMs, core::LanguagePref language) : lifecycle(idleMs, Now()), appliedLanguage(language) {}
@@ -89,18 +87,12 @@ namespace fastlook::viewer
                 {
                     CheckMemoryCeiling();
                 }
-                else if (event == core::ViewerEvent::Tick && ceilingExitDue != 0 && Now() >= ceilingExitDue)
-                {
-                    ceilingExitDue = 0;
-                    lifecycle.SetExitWhenQuiet();
-                }
                 Apply(lifecycle.On(event, Now()));
             }
 
             // Safety net: graphics-driver pools and caches only grow with use. Above the ceiling the Viewer restarts at the next
-            // quiet moment, like an idle exit (the daemon starts a fresh one on the next Space or prewarm). The exit is armed from
-            // a later Tick, not from the close that crossed the ceiling: that close has just handed its media player to the ordered
-            // close (MediaPreviewer, ~100 ms on a hidden window), which must run before the process tears down.
+            // quiet moment, like an idle exit (the daemon starts a fresh one on the next Space or prewarm). Lifecycle exits on a later
+            // Tick once quiet for kQuietExitDelayMs, never inside the close, so the ordered media close of that close runs first.
             void CheckMemoryCeiling()
             {
                 if (memoryCeilingHit)
@@ -119,7 +111,7 @@ namespace fastlook::viewer
                 {
                     memoryCeilingHit = true;
                     FL_LOG_INFO(L"Private Bytes {} MB above the {} MB ceiling; exiting when quiet", privateMB, ceilingMB);
-                    ceilingExitDue = Now() + kCeilingExitDelayMs;
+                    lifecycle.SetExitWhenQuiet();
                 }
             }
 
