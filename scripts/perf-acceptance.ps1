@@ -9,7 +9,8 @@
   out/perf-acceptance.json, rewritten after EVERY step, so a killed run still leaves the finished rows behind.
 
   Bench memory rows (task 34, lead ruling): the acceptance row is the growth of FastLook's own memory (heap busy bytes, summed
-  over the 50-open intervals without a graphics-driver pool step) with the window really closing between opens; the graphics driver's pool (D3DKMT)
+  over the 50-open intervals without a graphics-driver pool step) with the window really closing between opens, median of
+  -BenchRuns (default 3) bench runs; the graphics driver's pool (D3DKMT)
   is reported in an INFO row. INFO rows never fail the run.
 
   Honesty rules: before a step runs its JSON is deleted; a step that throws, exits non-zero (ram, bench, video) or leaves no JSON
@@ -26,6 +27,7 @@
 [CmdletBinding()]
 param(
     [int]$BenchIterations = 1000,
+    [int]$BenchRuns = 3,
     [int]$E2EIterations = 1000,
     [int]$VideoIterations = 200,
     [string[]]$Only = @(),
@@ -151,7 +153,8 @@ function Build-Rows {
     Add-Row 'Space -> window (cold) p50, ms' (Num $cold.coldWindowMs.p50) '<= 400' { param($v) $v -le 400 } 'e2e -Cold'
     Add-Row '24 MP photo, MB (daemon + Viewer)' (Num $ram.photoMB) '<= 120' { param($v) $v -le 120 } 'measure-ram'
     $bs = Split-Growth $bench
-    $bsOwnDetail = if ($bs) { "raw {0} MB, of it {1} MB in the {2} of {3} intervals with a driver step (driver bookkeeping in the process heap); non-heap private commit {4} MB; handles {5:+#;-#;0}; Private Bytes {6} MB" -f $bs.ownRaw, $bs.ownInSteps, $bs.driverSteps, $bs.intervals, $bs.nonHeap, $bs.handles, $bs.privateBytes } else { '' }
+    $bsMedian = if ($bench -and $bench.medianOf) { "median of {0} runs (own by run: {1}; median run {2}); median run: " -f $bench.medianOf.runs, (($bench.medianOf.ownByRun | ForEach-Object { '{0:n2}' -f $_ }) -join ' / '), $bench.medianOf.medianRun } else { 'single run: ' }
+    $bsOwnDetail = if ($bs) { $bsMedian + "raw {0} MB, of it {1} MB in the {2} of {3} intervals with a driver step (driver bookkeeping in the process heap); non-heap private commit {4} MB; handles {5:+#;-#;0}; Private Bytes {6} MB" -f $bs.ownRaw, $bs.ownInSteps, $bs.driverSteps, $bs.intervals, $bs.nonHeap, $bs.handles, $bs.privateBytes } else { '' }
     Add-Row ('{0} opens: own memory growth (heap busy, 100 -> end, outside driver steps), MB' -f $BenchIterations) (Num $bs.own) '<= 2' { param($v) $v -le 2 } 'bench' -Detail $bsOwnDetail
     $bsDrvDetail = if ($bs) { "{0} step(s) of +{1} MB in total; outside the steps {2} MB" -f $bs.driverSteps, $bs.driverStepMB, $bs.driverRest } else { '' }
     Add-Row ('{0} opens: graphics driver pool growth (D3DKMT, 100 -> end), MB' -f $BenchIterations) (Num $bs.driver) 'reported (bounded)' { $true } 'bench' -Info -Detail $bsDrvDetail
@@ -214,6 +217,46 @@ foreach ($name in $allSteps) {
         if (-not (Test-Path (Join-Path $dir 'video-1080p.mp4'))) { Copy-Item (Join-Path $repo 'out\fixtures\video-1080p.mp4') $dir }
     }
     $step = $steps[$name]
+    if ($name -eq 'bench') {
+        # The own-memory row is the median of $BenchRuns runs (lead ruling, task 34): one run is too noisy (driver steps).
+        $sw = [Diagnostics.Stopwatch]::StartNew()
+        $runs = [System.Collections.Generic.List[object]]::new()
+        $exits = @()
+        for ($r = 1; $r -le $BenchRuns; $r++) {
+            if ($r -gt 1 -and -not (Wait-FreeRam)) { $state[$name].note = "run $r skipped: free RAM below $MinFreeRamMB MB for 10 min"; break }
+            $runJson = Join-Path $perf "bench-run$r.json"
+            Remove-Item $runJson -ErrorAction SilentlyContinue
+            $runArgs = $cfg + @('-Iterations', $BenchIterations, '-OutJson', $runJson)
+            Write-Host "== bench run $r/${BenchRuns}: pwsh bench.ps1 $($runArgs -join ' ')"
+            try {
+                & pwsh -NoProfile -File (Join-Path $PSScriptRoot 'bench.ps1') @runArgs *>&1 | Tee-Object -FilePath (Join-Path $perf "bench-run$r.log") | ForEach-Object { Write-Host "   $_" }
+                $exits += $LASTEXITCODE
+            }
+            catch { $exits += 1; $state[$name].note = "run $r threw: $_" }
+            if (Test-Path $runJson) {
+                try {
+                    $d = Get-Content $runJson -Raw | ConvertFrom-Json
+                    $g = Split-Growth $d
+                    if ($g) { $runs.Add([pscustomobject]@{ run = $r; own = $g.own; data = $d }) }
+                }
+                catch { }
+            }
+        }
+        $state[$name].exit = if ($exits.Count -eq $BenchRuns -and @($exits | Where-Object { $_ -ne 0 }).Count -eq 0) { 0 } else { 1 }
+        if ($runs.Count -eq $BenchRuns) {
+            # bench.json = the median run, with the failures of all runs and the per-run own values for the row detail.
+            $sorted = @($runs | Sort-Object own)
+            $median = $sorted[[int][math]::Floor(($sorted.Count - 1) / 2)]
+            $out = $median.data
+            $out.failures = ($runs | ForEach-Object { [int]$_.data.failures } | Measure-Object -Sum).Sum
+            $out | Add-Member -NotePropertyName medianOf -NotePropertyValue ([pscustomobject]@{ runs = $BenchRuns; medianRun = $median.run; ownByRun = @($runs | ForEach-Object { $_.own }) }) -Force
+            $out | ConvertTo-Json -Depth 8 | Set-Content $json[$name] -Encoding utf8
+        }
+        elseif (-not $state[$name].note) { $state[$name].note = "only $($runs.Count) of $BenchRuns runs gave a memory split" }
+        Write-Host ("== {0}: exit {1} in {2:n0} s {3}" -f $name, $state[$name].exit, $sw.Elapsed.TotalSeconds, $state[$name].note)
+        $null = Save-Result
+        continue
+    }
     Write-Host "== ${name}: pwsh $($step.script) $($step.args -join ' ')"
     $sw = [Diagnostics.Stopwatch]::StartNew()
     try {
