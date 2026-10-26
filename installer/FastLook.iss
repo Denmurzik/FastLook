@@ -19,6 +19,8 @@ AppUpdatesURL=https://github.com/Denmurzik/FastLook/releases
 VersionInfoVersion={#AppVersion}
 PrivilegesRequired=lowest
 DefaultDirName={localappdata}\Programs\FastLook
+; The install path is fixed by the spec; a hand-picked existing folder would be exposed to [InstallDelete].
+DisableDirPage=yes
 DisableProgramGroupPage=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
@@ -30,6 +32,8 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=no
+; Silent updates (the in-app updater) run this [Code] unattended; the log (%TEMP%\Setup Log ....txt) is the only diagnostics.
+SetupLogging=yes
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -50,13 +54,13 @@ Name: "autostart"; Description: "{cm:AutostartTask}"
 Source: "{#StageDir}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 
 [InstallDelete]
-; Runtime files of the previous version that a newer stage may no longer ship (stale DLLs). Top level only: the uninstaller
-; (unins*.exe) and subfolders are left alone; the installed layout keeps no user data in {app}.
-Type: files; Name: "{app}\*.dll"
-Type: files; Name: "{app}\*.pri"
-Type: files; Name: "{app}\*.xbf"
-Type: files; Name: "{app}\*.winmd"
-Type: files; Name: "{app}\*.txt"
+; Runtime files of the previous version that a newer stage may no longer ship (stale DLLs). Upgrades only (stale files exist only
+; then). Top level only: the uninstaller (unins*.exe) and subfolders are left alone; the installed layout keeps no user data in {app}.
+Type: files; Name: "{app}\*.dll"; Check: IsUpgradeInstall
+Type: files; Name: "{app}\*.pri"; Check: IsUpgradeInstall
+Type: files; Name: "{app}\*.xbf"; Check: IsUpgradeInstall
+Type: files; Name: "{app}\*.winmd"; Check: IsUpgradeInstall
+Type: files; Name: "{app}\*.txt"; Check: IsUpgradeInstall
 
 [Icons]
 Name: "{userprograms}\FastLook"; Filename: "{app}\FastLook.exe"
@@ -74,6 +78,7 @@ const
 
 var
   IsUpgrade: Boolean;
+  AutostartPreset: Boolean;
 
 // Decided once at start, before Inno writes this run's own uninstall key.
 function InitializeSetup(): Boolean;
@@ -82,14 +87,41 @@ begin
   Result := True;
 end;
 
-// Fresh install (or interactive upgrade): honour the autostart task. Silent upgrade (the updater): keep the user's current state,
-// i.e. never re-create a Run value that was removed in Settings.
+function IsUpgradeInstall: Boolean;
+begin
+  Result := IsUpgrade;
+end;
+
+// The Run value of THIS install ({app}\FastLook.exe, quoted as the app writes it), not a portable copy's.
+function RunValueIsOurs: Boolean;
+var
+  Data: String;
+begin
+  Result := RegQueryStringValue(HKEY_CURRENT_USER, RunKey, 'FastLook', Data) and
+    (CompareText(Data, '"' + ExpandConstant('{app}\FastLook.exe') + '"') = 0);
+end;
+
+// Fresh install and interactive upgrade: honour the autostart task (preset to the current state on upgrades, see CurPageChanged).
+// Silent upgrade (the updater): keep the user's current state, i.e. never re-create a Run value that was removed in Settings.
 function ShouldWriteAutostart: Boolean;
 begin
   if WizardSilent and IsUpgrade then
     Result := RegValueExists(HKEY_CURRENT_USER, RunKey, 'FastLook')
   else
     Result := True;
+end;
+
+// Interactive upgrade: show the task as the current state (UsePreviousTasks would show the previous install's choice).
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (CurPageID = wpSelectTasks) and IsUpgrade and not AutostartPreset then
+  begin
+    AutostartPreset := True;
+    if RegValueExists(HKEY_CURRENT_USER, RunKey, 'FastLook') then
+      WizardSelectTasks('autostart')
+    else
+      WizardSelectTasks('!autostart');
+  end;
 end;
 
 // FastLook.exe --shutdown: exit 0 once the daemon (and its Viewer) is gone, 1 if still alive after 5 s.
@@ -107,7 +139,7 @@ end;
 // user (a per-user installer cannot touch other users' processes anyway), interactive runs offer Retry / Cancel.
 function StopFastLook(const ExeDir: String; Silent: Boolean): Boolean;
 var
-  Exe: String;
+  Exe, Dir: String;
   Code: Integer;
 begin
   Result := True;
@@ -120,7 +152,12 @@ begin
       Exit;
     if Silent then
     begin
-      Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM FastLook.exe /IM FastLook.Viewer.exe /IM FastLook.PreviewHost.exe',
+      // Only processes started from this install folder (a portable copy elsewhere is left alone).
+      Dir := ExeDir;
+      StringChangeEx(Dir, '''', '''''', True);
+      Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'),
+        '-NoProfile -NonInteractive -Command "$d = ''' + Dir + '\''; Get-Process | Where-Object { $_.ProcessName -like ''FastLook*'' ' +
+        '-and $_.Path -and $_.Path.StartsWith($d, [StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force"',
         '', SW_HIDE, ewWaitUntilTerminated, Code);
       Sleep(1000);
       Exit;
@@ -136,9 +173,9 @@ end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
-  // The Retry/Cancel dialog already explained the problem; Cancel aborts Setup silently (no second error box).
+  // Abort does not stop Setup here; a non-empty result stops it on the Preparing to Install page with this text.
   if not StopFastLook(ExpandConstant('{app}'), WizardSilent) then
-    Abort;
+    Result := CustomMessage('StillRunning');
 end;
 
 function InitializeUninstall(): Boolean;
@@ -151,7 +188,11 @@ begin
   if CurUninstallStep = usPostUninstall then
   begin
     // Autostart may have been enabled later from Settings; uninsdeletevalue only covers the installer's own entry.
-    RegDeleteValue(HKEY_CURRENT_USER, RunKey, 'FastLook');
+    // Only if it points at this install: a portable copy keeps its own autostart.
+    if RunValueIsOurs then
+      RegDeleteValue(HKEY_CURRENT_USER, RunKey, 'FastLook');
+    // Installer downloaded by the in-app updater.
+    DelTree(ExpandConstant('{%TEMP}\FastLook-Update'), True, True, True);
     if not UninstallSilent then
       if MsgBox(CustomMessage('DeleteData'), mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
         DelTree(ExpandConstant('{localappdata}\FastLook'), True, True, True);

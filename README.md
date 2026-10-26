@@ -55,7 +55,7 @@ Windows 11 22H2 или новее, x64.
 
 ### Настройки
 
-Окно настроек открывается из значка в трее. Разделы: **Общие** (клавиша активации, предпросмотр на рабочем столе, запуск при входе, проверка обновлений, язык, тема), **Просмотр** (перенос строк, размер шрифта кода, режим Markdown, автозапуск медиа, обработчики оболочки, прогрев, выгрузка в простое, предупреждение о Peek), **О программе** (версия, журналы, лицензии). Язык применяется после перезапуска.
+Окно настроек открывается из значка в трее. Разделы: **Общие** (клавиша активации, предпросмотр на рабочем столе, запуск при входе, предупреждение о Peek, прогрев, выгрузка в простое, тема, язык), **Просмотр** (перенос строк, размер шрифта кода, автозапуск медиа, обработчики оболочки, режим Markdown), **О программе** (версия, проверка обновлений, GitHub, лицензии, журналы). Язык применяется после перезапуска.
 
 ### Конфиденциальность
 
@@ -82,14 +82,14 @@ FastLook не обращается к сети, кроме ручной пров
 
 ### Сборка из исходников
 
-Нужны Visual Studio Build Tools с рабочей нагрузкой C++ и PowerShell 7.
+Нужны: Visual Studio Build Tools 18.x с рабочей нагрузкой C++ (MSVC v145) и компонентом «vcpkg package manager» (либо переменная `VCPKG_ROOT` с готовым vcpkg), Windows SDK 10.0.26100, доступ к NuGet, PowerShell 7. Для установщика — Inno Setup 6.3 или новее.
 
 ```powershell
 pwsh scripts/build.ps1 -Project All
 pwsh scripts/test.ps1
 ```
 
-Версия задаётся в одном месте — `src/Common/Version.h`. Упаковка: `pwsh scripts/package.ps1`.
+Версия задаётся в одном месте — `src/Common/Version.h`. Упаковка (чистая сборка, портативный zip и установщик в `out/dist`): `pwsh scripts/package.ps1 -Clean`.
 
 ### Лицензия
 
@@ -148,7 +148,7 @@ Windows 11 22H2 or newer, x64.
 
 ### Settings
 
-The settings window opens from the tray icon. Sections: **General** (activation key, preview on the desktop, launch at sign-in, update check, language, theme), **Preview** (word wrap, code font size, Markdown mode, media autoplay, shell handlers, prewarm, idle unload, Peek warning), **About** (version, logs, licences). A language change takes effect after restart.
+The settings window opens from the tray icon. Sections: **General** (activation key, preview on the desktop, launch at sign-in, Peek warning, prewarm, idle unload, theme, language), **Preview** (word wrap, code font size, media autoplay, shell handlers, Markdown mode), **About** (version, update check, GitHub, licences, logs). A language change takes effect after restart.
 
 ### Privacy
 
@@ -175,14 +175,14 @@ FastLook uses the network only for the manual update check (a button in settings
 
 ### Build from source
 
-Requires Visual Studio Build Tools with the C++ workload and PowerShell 7.
+Requires: Visual Studio Build Tools 18.x with the C++ workload (MSVC v145) and the "vcpkg package manager" component (or `VCPKG_ROOT` pointing at a vcpkg checkout), Windows SDK 10.0.26100, NuGet access, and PowerShell 7. The installer additionally needs Inno Setup 6.3 or newer.
 
 ```powershell
 pwsh scripts/build.ps1 -Project All
 pwsh scripts/test.ps1
 ```
 
-The version lives in one place: `src/Common/Version.h`. Packaging: `pwsh scripts/package.ps1`.
+The version lives in one place: `src/Common/Version.h`. Packaging (clean build, portable zip and installer in `out/dist`): `pwsh scripts/package.ps1 -Clean`.
 
 ### License
 

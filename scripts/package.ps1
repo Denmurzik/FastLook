@@ -10,6 +10,7 @@
   scripts/check-iss.ps1.
   RestartAgent.exe is a Windows App SDK runtime file (Microsoft, Foundation runtimes-framework) and is kept.
 .EXAMPLE
+  pwsh scripts/package.ps1 -Clean            # release: clean build, then package
   pwsh scripts/package.ps1 -NoBuild -SkipInstaller
 #>
 [CmdletBinding()]
@@ -19,6 +20,8 @@ param(
     # x.y.z; defaults to FASTLOOK_VERSION_STR in src/Common/Version.h. When given it must equal Version.h (check-iss enforces it).
     [string]$Version,
     [switch]$NoBuild,
+    # Delete out/bin/<Configuration> before building, so the stage cannot ship xbf/pri/DLLs left from earlier builds. Use it for releases.
+    [switch]$Clean,
     [switch]$SkipInstaller,
     # Platform toolset override passed to build.ps1, e.g. v143.
     [string]$Toolset
@@ -36,6 +39,11 @@ if (-not $Version) {
 }
 Write-Host "Packaging FastLook $Version ($Configuration)"
 
+if ($Clean -and $NoBuild) { throw '-Clean and -NoBuild contradict each other.' }
+if ($Clean) {
+    $cleanBin = Join-Path $repo "out\bin\$Configuration"
+    if (Test-Path $cleanBin) { Remove-Item -Recurse -Force $cleanBin }
+}
 if (-not $NoBuild) {
     $buildArgs = @('-Configuration', $Configuration, '-Project', 'All')
     if ($Toolset) { $buildArgs += @('-Toolset', $Toolset) }
@@ -52,6 +60,8 @@ foreach ($exe in 'FastLook.exe', 'FastLook.Viewer.exe', 'FastLook.PreviewHost.ex
 
 # --- Stage ---------------------------------------------------------------------------------------------------------------
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+# out/dist holds only this run's artifacts: no stale setups, zips or .sha256 of earlier versions to upload by accident.
+if (Test-Path $dist) { Get-ChildItem $dist -Force | Remove-Item -Recurse -Force }
 New-Item -ItemType Directory -Force $stage, $dist | Out-Null
 
 $excludeFiles = @('*.pdb', '*.lib', '*.exp', '*.ilk', '*.iobj', '*.ipdb', '*.binlog',
@@ -172,7 +182,7 @@ if ($SkipInstaller) {
         }
     }
     if (-not $iscc) {
-        Write-Warning 'Inno Setup (iscc) not found; installer not built (check-iss.ps1 passed). CI installs Inno Setup.'
+        Write-Warning 'Inno Setup (iscc) not found; installer not built (check-iss.ps1 passed). Install Inno Setup 6.3+ to produce FastLook-Setup-<version>.exe.'
     } else {
         & $iscc /Q "/DAppVersion=$Version" "/DStageDir=$stage" "/O$dist" $iss
         if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }

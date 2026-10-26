@@ -49,7 +49,28 @@ namespace
                result != 0;
     }
 
-    // The daemon may hold its mutex before it has created its window, so retry only when an instance exists.
+    // True once no process holds the daemon mutex (it disappears with the last handle, i.e. at process exit) before the deadline.
+    bool WaitMutexGone(ULONGLONG deadline)
+    {
+        for (;;)
+        {
+            HANDLE const mutex = OpenMutexW(SYNCHRONIZE, FALSE, daemon::kMutexName);
+            if (!mutex)
+            {
+                return true;
+            }
+            CloseHandle(mutex);
+            if (GetTickCount64() >= deadline)
+            {
+                return false;
+            }
+            Sleep(50);
+        }
+    }
+
+    // Exit 0 only when the daemon process is really gone (its mutex released), 1 if it is still alive after kShutdownWaitMs.
+    // The daemon may hold its mutex before it has created its window, so retry only when an instance exists. A window that is
+    // already gone while the mutex is still held means the process is still exiting: wait for the mutex, do not report "gone".
     int Shutdown()
     {
         HANDLE const mutex = OpenMutexW(SYNCHRONIZE, FALSE, daemon::kMutexName);
@@ -59,9 +80,10 @@ namespace
             CloseHandle(mutex);
         }
         HWND const wnd = FindDaemonWindow(instanceExists ? kFindRetries : 0);
+        ULONGLONG const deadline = GetTickCount64() + kShutdownWaitMs;
         if (!wnd)
         {
-            return 0;
+            return !instanceExists || WaitMutexGone(deadline) ? 0 : 1;
         }
         DWORD pid = 0;
         GetWindowThreadProcessId(wnd, &pid);
@@ -69,21 +91,27 @@ namespace
         Forward(wnd, daemon::kCopyShutdown);
         if (process)
         {
-            bool const gone = WaitForSingleObject(process, kShutdownWaitMs) == WAIT_OBJECT_0;
+            DWORD const waited = WaitForSingleObject(process, kShutdownWaitMs);
             CloseHandle(process);
-            return gone ? 0 : 1;
-        }
-        // No handle to wait on: wait for the window to disappear instead.
-        ULONGLONG const deadline = GetTickCount64() + kShutdownWaitMs;
-        while (IsWindow(wnd))
-        {
-            if (GetTickCount64() >= deadline)
+            if (waited != WAIT_OBJECT_0)
             {
                 return 1;
             }
-            Sleep(50);
         }
-        return 0;
+        else
+        {
+            // No handle to wait on: wait for the window to disappear instead.
+            while (IsWindow(wnd))
+            {
+                if (GetTickCount64() >= deadline)
+                {
+                    return 1;
+                }
+                Sleep(50);
+            }
+        }
+        // Stale pid or a second instance: the mutex is the authority.
+        return WaitMutexGone(deadline) ? 0 : 1;
     }
 }
 

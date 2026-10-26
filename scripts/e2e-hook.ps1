@@ -11,6 +11,8 @@
   It opens its own Explorer windows (Shell.Application), starts a FastLook daemon with a temp FASTLOOK_DATA_DIR, drives it with
   Space/Right/Esc/F2/..., prints one `PASS|FAIL|SKIP <check> <details>` line per check and writes a JSON summary. `finally`
   closes every Explorer window it opened, runs `--shutdown`, kills every FastLook* process and deletes its temp files.
+  The one write outside temp is a `fastlook-e2e-<8 hex>.txt` file on the real Desktop (section 9); it is removed in `finally`, and a
+  leftover of a killed run is swept at the next run.
   PowerToys Peek is never touched; when it runs the script only warns and counts windows it opens.
 
   Latency is measured with QPC: sendQpc (just before SendInput of Space) to the first poll that sees a visible, unowned
@@ -752,7 +754,11 @@ try {
 
         Begin-Section
         # ---- 9. desktop ----
-        $deskFile = Join-Path ([Environment]::GetFolderPath('Desktop')) ("fastlook-e2e-{0}.txt" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
+        # The only write outside temp: the desktop item must be on the real Desktop to be shown by Explorer. A leftover of a killed
+        # run (Ctrl+C twice, host crash) is swept here before creating the new one; finally removes it on every normal exit.
+        $deskDir = [Environment]::GetFolderPath('Desktop')
+        Get-ChildItem $deskDir -Filter 'fastlook-e2e-*.txt' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+        $deskFile = Join-Path $deskDir ("fastlook-e2e-{0}.txt" -f [guid]::NewGuid().ToString('N').Substring(0, 8))
         try {
             Set-Content $deskFile 'desktop e2e' -Encoding utf8
             Pause 800

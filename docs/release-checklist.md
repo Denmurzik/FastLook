@@ -1,7 +1,15 @@
 # Release checklist
 
 Manual items that are not automated. Run on a clean Windows 11 22H2+ x64 machine unless noted. Automated gates first:
-`pwsh scripts/build.ps1 -Project All`, `pwsh scripts/test.ps1`, `scripts/perf-acceptance.ps1` (all PASS), CI green on the tag.
+`pwsh scripts/build.ps1 -Project All`, `pwsh scripts/test.ps1`, `scripts/perf-acceptance.ps1` (all PASS). There is no CI: the release is built and
+published locally.
+
+Release sequence (local):
+1. `pwsh scripts/package.ps1 -Clean` (clean `out\bin\Release`, build, stage, smoke, zip, installer). Confirm in the output that `iscc` was found
+   (no "Inno Setup (iscc) not found" warning) and that `out\dist` holds exactly four files: `FastLook-1.0.0-portable-x64.zip`,
+   `FastLook-Setup-1.0.0.exe` and their `.sha256`.
+2. Optionally keep `out\bin\Release\*.pdb` zipped (not published) to symbolise crash dumps of this version.
+3. `gh release create v1.0.0 <the four files from out\dist>` (name them explicitly).
 
 ## Explorer and hook
 - [ ] Space opens the preview: single Explorer window, several tabs, desktop with the setting on and off.
@@ -25,18 +33,27 @@ Manual items that are not automated. Run on a clean Windows 11 22H2+ x64 machine
 - [ ] Mouse selection, double-click word and Ctrl+C in text and code.
 - [ ] After clicking into a shell-handler preview (font, Office), Esc, Space and Left/Right still work.
 - [ ] Zoom (Ctrl +/-/0), F11 full screen.
+- [ ] Esc in the update ContentDialog closes it (deferred from Task 24).
 - [ ] Multi-monitor with mixed DPI: the window opens on the right monitor at the right size, text stays sharp when dragged between monitors.
 
 ## Settings and updates
 - [ ] Settings persist across restart; language switch applies after restart (RU and EN complete, no missing strings).
 - [ ] Theme: light, dark, system.
-- [ ] Check for updates: no release / no newer release, newer release (download and install), hash mismatch is rejected.
+- [ ] Check for updates: no release / no newer release, hash mismatch is rejected. "Newer release (download and install)" cannot be tested until a newer
+  release exists: post-release, or against a `FASTLOOK_UPDATE_API` test feed.
 - [ ] Real GitHub update check against a published release (redirect chain works) once a release exists.
 
 ## Installer and packaging
+- [ ] Inno Setup 6.3+ was used to build the installer (the `x64compatible` identifiers; the local install is 6.6).
 - [ ] Fresh install (per-user); app starts, tray icon present.
 - [ ] Autostart option on and off.
-- [ ] Upgrade over an existing install and over a running instance; autostart preserved.
+- [ ] Upgrade over an existing install and over a running instance (interactive); autostart state preserved (off stays off, the task checkbox shows the current state).
+- [ ] Silent upgrade, as the in-app updater runs it: `FastLook-Setup-1.0.0.exe /SILENT /SUPPRESSMSGBOXES /NORESTART` over a *running* installed 1.0.0
+  with autostart switched OFF in Settings. Expected: FastLook is stopped, files are replaced, autostart stays off, FastLook relaunches.
+  A `Setup Log ....txt` appears in `%TEMP%` (SetupLogging=yes).
+- [ ] "Still running" box: block the stop (e.g. a hung FastLook), interactive upgrade, click Cancel: Setup stops on the Preparing page, nothing is deleted.
+- [ ] Uninstall while FastLook is running, interactive and `/SILENT`: it is stopped first, all files go, `%TEMP%\FastLook-Update` is gone; a portable copy's autostart value is untouched.
+- [ ] No directory page in the installer (fixed path); a fresh install does not touch other files in the folder.
 - [ ] Uninstall: the data prompt defaults to No (keep settings); answering Yes removes settings.
 - [ ] Portable zip: contains `portable.txt` and `THIRD_PARTY_NOTICES.txt`, runs from an arbitrary folder, writes settings beside the exe.
 - [ ] `.sha256` files match the artifacts.
@@ -48,4 +65,4 @@ Manual items that are not automated. Run on a clean Windows 11 22H2+ x64 machine
 
 ## Release
 - [ ] README performance section filled from the perf-acceptance report.
-- [ ] Tag `v1.0.0`, release assets uploaded with `.sha256`.
+- [ ] Tag `v1.0.0`, release assets (the four files above) uploaded with `.sha256`.
