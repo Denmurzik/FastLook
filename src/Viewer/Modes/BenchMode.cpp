@@ -37,6 +37,7 @@ namespace fastlook::viewer
         constexpr auto kSettle = std::chrono::seconds(1);
         constexpr auto kCloseCap = std::chrono::seconds(2);
         constexpr uint32_t kSeriesEvery = 50;
+        constexpr size_t kMaxHeapRanges = 65536;
         constexpr uint32_t kSampleAt = 100;
 
         double Ms(LARGE_INTEGER from, LARGE_INTEGER to)
@@ -123,7 +124,10 @@ namespace fastlook::viewer
             std::vector<HANDLE> heaps(GetProcessHeaps(0, nullptr) + 16);
             DWORD const count = std::min<DWORD>(GetProcessHeaps(static_cast<DWORD>(heaps.size()), heaps.data()), static_cast<DWORD>(heaps.size()));
             uint64_t busy = 0;
-            std::vector<std::pair<uintptr_t, uintptr_t>> ranges; // [begin, end) of heap regions and large blocks
+            // [begin, end) of heap regions and large blocks. Reserved up front: the walk must not allocate from the heaps it walks
+            // (a range beyond the reservation is dropped, which can only count a little heap memory as non-heap).
+            std::vector<std::pair<uintptr_t, uintptr_t>> ranges;
+            ranges.reserve(kMaxHeapRanges);
             for (DWORD i = 0; i < count; ++i)
             {
                 if (!HeapLock(heaps[i]))
@@ -140,12 +144,15 @@ namespace fastlook::viewer
                     {
                         regionBegin = data;
                         regionEnd = reinterpret_cast<uintptr_t>(entry.Region.lpLastBlock);
-                        ranges.emplace_back(regionBegin, regionEnd);
+                        if (ranges.size() < ranges.capacity())
+                        {
+                            ranges.emplace_back(regionBegin, regionEnd);
+                        }
                     }
                     else if (entry.wFlags & PROCESS_HEAP_ENTRY_BUSY)
                     {
                         busy += entry.cbData;
-                        if (data < regionBegin || data >= regionEnd)
+                        if ((data < regionBegin || data >= regionEnd) && ranges.size() < ranges.capacity())
                         {
                             ranges.emplace_back(data, data + entry.cbData);
                         }
