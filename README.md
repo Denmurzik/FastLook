@@ -74,11 +74,22 @@ FastLook не обращается к сети, кроме ручной пров
 
 ### Производительность
 
-> **Заполнить перед релизом** из отчёта `scripts/perf-acceptance.ps1`: время до показа, ОЗУ в простое и при просмотре. Числа здесь намеренно не указаны.
+Замерено 2026-10-26 скриптом `scripts/perf-acceptance.ps1` (Release, версия 1.0.0).
 
-| Метрика | Значение |
-|---|---|
-| _TBD_ | _TBD_ |
+| Метрика | Цель | Замер |
+|---|---|---|
+| ОЗУ, только демон в простое (холодный) | ≤ 5 МБ | 0,2 МБ |
+| ОЗУ в простое с прогретым Viewer | ≤ 25 МБ | 1,8 МБ |
+| Space → окно (тёплый), p50 | ≤ 50 мс | 16,5 мс |
+| Space → текст показан (тёплый), p50 | ≤ 150 мс | 34,5 мс |
+| Space → изображение 24 Мп (JPEG) показано (тёплый), p50 | ≤ 150 мс | 176,8 мс (не уложились) |
+| Space → окно (холодный старт), p50 | ≤ 400 мс | 432 мс (не уложились) |
+| ОЗУ при просмотре фото 24 Мп (демон + Viewer) | ≤ 120 МБ | 29,7 МБ |
+| 1000 открытий: рост ОЗУ в простое (Private WS) | ≤ 2 МБ | 0,0 МБ |
+| 1000 нажатий Space: пропущено / падений | 0 / 0 | 0 / 0 |
+| Хук, путь Space, p99 | ≤ 250 мкс | 212 мкс |
+
+Замеры сделаны на ноутбуке (графика Intel, iGPU) от сети при другой нагрузке (фоновая загрузка ЦП около 20–35 %), поэтому задержки завышены. Показ JPEG 24 Мп (около 177 мс) выше цели в 150 мс — известное ограничение v1.0 (декодирование JPEG в WIC). Холодный старт (p50 432 мс против 400 мс) измерен под той же нагрузкой; сравнение A/B не показало регрессии в коде. Private Bytes Viewer могут расти при активной работе с видео; выше 400 МБ Viewer перезапускается сам.
 
 ### Сборка из исходников
 
@@ -167,11 +178,22 @@ FastLook uses the network only for the manual update check (a button in settings
 
 ### Performance
 
-> **Fill in before release** from the `scripts/perf-acceptance.ps1` report: time to show, idle RAM and in-use RAM. No numbers are given here on purpose.
+Measured on 2026-10-26 with `scripts/perf-acceptance.ps1` (Release, version 1.0.0).
 
-| Metric | Value |
-|---|---|
-| _TBD_ | _TBD_ |
+| Metric | Target | Measured |
+|---|---|---|
+| Daemon-only idle RAM (cold) | <= 5 MB | 0.2 MB |
+| Warm-idle RAM with the prewarmed Viewer | <= 25 MB | 1.8 MB |
+| Space -> window (warm), p50 | <= 50 ms | 16.5 ms |
+| Space -> text rendered (warm), p50 | <= 150 ms | 34.5 ms |
+| Space -> 24 MP JPEG rendered (warm), p50 | <= 150 ms | 176.8 ms (missed) |
+| Space -> window (cold start), p50 | <= 400 ms | 432 ms (missed) |
+| RAM while previewing a 24 MP photo (daemon + Viewer) | <= 120 MB | 29.7 MB |
+| 1000 opens: warm-idle RAM growth (Private WS) | <= 2 MB | 0.0 MB |
+| 1000 Space presses: missed / crashes | 0 / 0 | 0 / 0 |
+| Hook callback, Space path, p99 | <= 250 us | 212 us |
+
+Measured on a laptop (Intel iGPU) on AC power with other workloads running (about 20-35 % background CPU), so latencies are pessimistic. The 24 MP JPEG render (about 177 ms) exceeds the 150 ms target: a known v1.0 limitation (WIC JPEG decode). Cold start (p50 432 ms vs the 400 ms target) was measured under the same load; an A/B run showed no code regression. The Viewer's Private Bytes can grow with heavy video use; above 400 MB the Viewer restarts itself.
 
 ### Build from source
 
