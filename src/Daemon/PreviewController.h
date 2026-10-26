@@ -42,6 +42,8 @@ namespace fastlook::daemon
         void TogglePath(std::wstring const& path);
         void OpenSettings(std::wstring_view page = L"general");
         void OnSettingsChanged(core::Settings const& settings);
+        // Tray "Pause": no prewarm while paused (the hook already ignores Space).
+        void SetPaused(bool paused) { m_paused.store(paused); }
         void Shutdown();
 
     private:
@@ -68,6 +70,7 @@ namespace fastlook::daemon
         core::Settings m_settings;
         std::thread m_thread;
         std::atomic<uint64_t> m_triggerSeq{0};
+        std::atomic<bool> m_paused{false};
         ULONGLONG m_lastPrewarmTick = 0; // main thread only
         std::chrono::steady_clock::time_point m_lastJobEnd; // controller thread only
         bool m_trimmed = true;

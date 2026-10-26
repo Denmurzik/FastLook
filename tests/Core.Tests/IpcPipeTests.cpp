@@ -177,6 +177,25 @@ TEST(IpcPipe, ConnectFailsFastWithoutServer)
     EXPECT_LT(ElapsedMs(start), 1000);
 }
 
+TEST(IpcPipe, ConnectChecksTheExpectedServerProcess)
+{
+    // Final review A#6: a same-user process that created the name first is not the Viewer the daemon launched.
+    auto name = TestPipeName(L"serverpid");
+    PipeServer srv(name);
+    std::thread t([&] { srv.Accept(500ms); });
+    auto start = std::chrono::steady_clock::now();
+    EXPECT_FALSE(ConnectPipe(name, 2000ms, GetCurrentProcessId() + 4));
+    EXPECT_LT(ElapsedMs(start), 1000);
+    t.join();
+
+    std::optional<PipeConnection> serverSide;
+    std::thread accept([&] { serverSide = srv.Accept(3000ms); });
+    auto cli = ConnectPipe(name, 3000ms, GetCurrentProcessId());
+    accept.join();
+    EXPECT_TRUE(cli);
+    EXPECT_TRUE(serverSide);
+}
+
 TEST(IpcPipe, NameHasSidAndVersion)
 {
     auto n = PipeNameForCurrentUser();

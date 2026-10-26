@@ -192,6 +192,7 @@ namespace fastlook::daemon
         case kCmdPause:
             m_paused = !m_paused;
             m_hook.SetConfig(MakeHookConfig());
+            m_controller.SetPaused(m_paused);
             m_tray.SetPaused(m_paused);
             break;
         case kCmdExit:

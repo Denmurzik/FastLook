@@ -533,7 +533,7 @@ namespace fastlook::core::ipc
         }
     }
 
-    std::optional<PipeConnection> ConnectPipe(std::wstring const& name, std::chrono::milliseconds timeout)
+    std::optional<PipeConnection> ConnectPipe(std::wstring const& name, std::chrono::milliseconds timeout, unsigned long expectedServerPid)
     {
         if (name.empty())
         {
@@ -547,7 +547,9 @@ namespace fastlook::core::ipc
             if (h != INVALID_HANDLE_VALUE)
             {
                 auto pidOf = [](HANDLE pipe, ULONG* pid) { return GetNamedPipeServerProcessId(pipe, pid) != FALSE; };
-                if (!PeerIsUser(h, pidOf, UserSidString(0)))
+                ULONG serverPid = 0;
+                if (!PeerIsUser(h, pidOf, UserSidString(0)) ||
+                    (expectedServerPid != 0 && (!pidOf(h, &serverPid) || serverPid != expectedServerPid)))
                 {
                     CloseHandle(h);
                     return std::nullopt;

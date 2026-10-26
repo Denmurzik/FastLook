@@ -344,7 +344,7 @@ namespace fastlook::daemon
             std::lock_guard lock(m_mutex);
             settings = m_settings;
         }
-        return settings.general.prewarm && (!isDesktop || settings.general.desktopEnabled);
+        return !m_paused.load() && settings.general.prewarm && (!isDesktop || settings.general.desktopEnabled);
     }
 
     void PreviewController::OnForegroundCandidate(bool isDesktop)

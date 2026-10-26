@@ -219,7 +219,7 @@ namespace fastlook::daemon
         auto const deadline = Clock::now() + kConnectTimeout;
         while (!conn && Clock::now() < deadline && !ProcessExited())
         {
-            conn = core::ipc::ConnectPipe(pipe, kConnectSlice);
+            conn = core::ipc::ConnectPipe(pipe, kConnectSlice, GetProcessId(m_process)); // only the Viewer we just started
         }
 
         if (ProcessExited())

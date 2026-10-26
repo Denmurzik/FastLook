@@ -54,6 +54,7 @@ namespace fastlook::core::ipc
     };
 
     // Retries until timeout while the server does not exist yet or is busy. Fails when the server process does not
-    // run as the current user.
-    std::optional<PipeConnection> ConnectPipe(std::wstring const& name, std::chrono::milliseconds timeout);
+    // run as the current user, or (when `expectedServerPid` is not 0) is not that process: another same-user process may
+    // have created the name first.
+    std::optional<PipeConnection> ConnectPipe(std::wstring const& name, std::chrono::milliseconds timeout, unsigned long expectedServerPid = 0);
 }
