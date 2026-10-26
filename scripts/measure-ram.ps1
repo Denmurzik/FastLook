@@ -5,8 +5,9 @@
   video residue, 24 MP with 24 MP neighbours + animation latency, hook callback right after the daemon's working-set trim).
 .DESCRIPTION
   All values are Private Working Set, summed over FastLook.exe + FastLook.Viewer.exe (+ PreviewHost when present); median of -Runs.
-    Cold            daemon only (prewarm off in a temp data dir), 5 s after start.
-    WarmIdle        `FastLook.exe --warm`; sampled at 6 s and at 35 s (after at least one heartbeat ping); the larger value counts.
+    Cold            daemon only (prewarm off in a temp data dir), 12 s after start (after the idle trim; the 5 s value is kept as coldAt5sMB).
+    WarmIdle        `FastLook.exe --warm`; sampled at 12 s (after the idle trim, like Cold) and at 35 s (after a heartbeat ping); the larger value counts. The prewarmed
+                    Viewer must be running at both samples (else a note and warmViewerPresent=false); daemon and Viewer are reported separately.
     WarmAfterUse    warm + `--show photo24mp.jpg`, then `--toggle` the same file (hides it), 3 s later (decision 55: GPU device kept).
     WarmAfterTrim   the same, 12 s after the hide (the daemon trims 5 s after its last job).
     Photo           warm + `--show photo24mp.jpg`, 3 s later.
@@ -44,21 +45,33 @@ $photo = Join-Path $fx 'photo24mp.jpg'
 $video = Join-Path $fx 'video-1080p.mp4'
 
 $names = 'FastLook', 'FastLook.Viewer', 'FastLook.PreviewHost'
-function Get-Total {
-    $sum = 0.0
-    foreach ($p in Get-Process -Name $names -ErrorAction SilentlyContinue) {
-        try { $sum += Get-PrivateWorkingSetMB -ProcessId $p.Id } catch { }
+# Processes that existed before this script started are not ours: they are neither measured nor killed.
+$script:preexisting = @(Get-Process -Name $names -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+function Get-Ours { @(Get-Process -Name $names -ErrorAction SilentlyContinue | Where-Object { $script:preexisting -notcontains $_.Id }) }
+# Private Working Set, MB: daemon, Viewer and PreviewHost separately plus the sum.
+function Get-Parts {
+    $parts = [ordered]@{ daemon = 0.0; viewer = 0.0; preview = 0.0; viewerRunning = $false }
+    foreach ($p in Get-Ours) {
+        try { $mb = Get-PrivateWorkingSetMB -ProcessId $p.Id } catch { continue }
+        switch ($p.ProcessName) {
+            'FastLook' { $parts.daemon += $mb }
+            'FastLook.Viewer' { $parts.viewer += $mb; $parts.viewerRunning = $true }
+            default { $parts.preview += $mb }
+        }
     }
-    [math]::Round($sum, 2)
+    $parts.total = [math]::Round($parts.daemon + $parts.viewer + $parts.preview, 2)
+    $parts.daemon = [math]::Round($parts.daemon, 2); $parts.viewer = [math]::Round($parts.viewer, 2)
+    [pscustomobject]$parts
 }
+function Get-Total { (Get-Parts).total }
 function Get-ProcMB([string]$Name) {
-    $p = Get-Process -Name $Name -ErrorAction SilentlyContinue | Select-Object -First 1
+    $p = Get-Ours | Where-Object { $_.ProcessName -eq $Name } | Select-Object -First 1
     if ($p) { [math]::Round((Get-PrivateWorkingSetMB -ProcessId $p.Id), 2) } else { $null }
 }
 function Stop-All {
     if (Test-Path $daemonExe) { try { Start-Process $daemonExe -ArgumentList '--shutdown' -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue } catch { } }
     Start-Sleep -Milliseconds 500
-    Get-Process -Name $names -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    Get-Ours | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 function Get-Median([double[]]$v) {
     $v = @($v | Where-Object { $null -ne $_ })
@@ -108,11 +121,11 @@ function Flush-Hook([string]$Log) {
     $null
 }
 
-$cold = @(); $warm = @(); $warm6 = @(); $warm35 = @(); $afterUse = @(); $afterTrim = @(); $photoMb = @()
+$cold = @(); $cold5 = @(); $coldDaemon = @(); $warm12 = @(); $warmDaemon = @(); $warmViewer = @(); $viewerMissing = $false; $warm = @(); $warm6 = @(); $warm35 = @(); $afterUse = @(); $afterTrim = @(); $photoMb = @()
 $videoClose = @(); $videoMb = @(); $videoTrim = @(); $videoViewerTrim = @(); $hookTrim = @(); $notes = @()
 
 try {
-    Enter-GuiLock 'measure-ram'
+    Enter-GuiLock 'fastlook-measure-ram'
     if (Get-Process -Name FastLook -ErrorAction SilentlyContinue) { throw 'FastLook.exe is already running (the daemon mutex is per session); stop it first.' }
 
     for ($run = 1; $run -le $Runs; $run++) {
@@ -121,10 +134,16 @@ try {
         # Cold: daemon only, prewarm off.
         $s = New-Session $false
         $d = Start-Process $daemonExe -PassThru
-        Start-Sleep -Seconds 5
+        $csw = [Diagnostics.Stopwatch]::StartNew()
+        Sleep-Until $csw 5000
         if ($d.HasExited) { throw "cold: daemon exited early ($($d.ExitCode))" }
-        $cold += Get-Total
-        Write-Host ("cold: {0} MB" -f $cold[-1])
+        $cold5 += Get-Total
+        # The daemon trims its working set 5 s after start/last job: Cold counts after that point, like Warm-idle does.
+        Sleep-Until $csw 12000
+        $cp = Get-Parts
+        if ($cp.viewerRunning) { $notes += "run ${run}: a Viewer is running in the cold session (prewarm should be off)" }
+        $cold += $cp.total; $coldDaemon += $cp.daemon
+        Write-Host ("cold: {0} MB at 5 s, {1} MB at 12 s (after the idle trim)" -f $cold5[-1], $cold[-1])
         Stop-All
 
         # Warm-idle, then the photo / video phases in the same warm session.
@@ -134,10 +153,19 @@ try {
         Sleep-Until $sw 6000
         if ($d.HasExited) { throw "warm: daemon exited early ($($d.ExitCode))" }
         $w6 = Get-Total
-        Sleep-Until $sw 35000
-        $w35 = Get-Total
-        $warm6 += $w6; $warm35 += $w35; $warm += [math]::Max($w6, $w35)
-        Write-Host ("warm-idle: {0} MB at 6 s, {1} MB at 35 s (viewer alone {2} MB)" -f $w6, $w35, (Get-ProcMB 'FastLook.Viewer'))
+        Sleep-Until $sw 12000   # after the idle trim, same point as Cold
+        $p12 = Get-Parts
+        Sleep-Until $sw 35000   # after at least one heartbeat ping
+        $p35 = Get-Parts
+        # The prewarmed Viewer must exist (hidden, trimmed) at both samples, otherwise this is not a warm measurement.
+        foreach ($pp in @(@('12 s', $p12), @('35 s', $p35))) {
+            if (-not $pp[1].viewerRunning) { $notes += "run ${run}: no FastLook.Viewer process at $($pp[0]) of the warm session"; $viewerMissing = $true }
+        }
+        $vis = @(Find-Process-Windows -Name 'FastLook.Viewer' | Where-Object { $_.Visible }).Count
+        if ($vis -gt 0) { $notes += "run ${run}: the prewarmed Viewer has a visible window in warm idle" }
+        $warm6 += $w6; $warm12 += $p12.total; $warm35 += $p35.total; $warm += [math]::Max($p12.total, $p35.total)
+        $warmDaemon += $p35.daemon; $warmViewer += $p35.viewer
+        Write-Host ("warm-idle: {0} MB at 6 s, {1} MB at 12 s, {2} MB at 35 s; at 35 s daemon {3} + viewer {4} MB (viewer running: {5})" -f $w6, $p12.total, $p35.total, $p35.daemon, $p35.viewer, $p35.viewerRunning)
 
         Send-Cli @('--show', $photo)
         Start-Sleep -Seconds 3
@@ -148,10 +176,10 @@ try {
 
         Send-Cli @('--toggle', $photo)
         $hideAt = [Diagnostics.Stopwatch]::StartNew()
-        $null = Flush-Hook $s.Log
         Sleep-Until $hideAt 3000
         $afterUse += Get-Total
         Write-Host ("warm-idle after use: {0} MB" -f $afterUse[-1])
+        $null = Flush-Hook $s.Log   # reset the histogram only after the sample (the rehook must not disturb it)
         Sleep-Until $hideAt 8000   # the daemon trimmed itself 5 s after its last job
         # Hook callback right after the trim: three F15 taps (harmless key), then flush the histogram through a rehook.
         if ($d.HasExited) { throw 'daemon exited during the after-use phase' }
@@ -172,6 +200,7 @@ try {
         $vVisible = @(Find-Process-Windows -Name 'FastLook.Viewer' | Where-Object { $_.Visible }).Count -gt 0
         $videoMb += Get-Total
         if (-not $vVisible) { $notes += "run ${run}: no visible Viewer window 4 s after --show video" }
+        if ($videoMb.Count -and $afterTrim.Count -and $videoMb[-1] - $afterTrim[-1] -lt 5) { $notes += "run ${run}: the video added < 5 MB while shown; it may not have played" }
         Send-Cli @('--toggle', $video)
         $vh = [Diagnostics.Stopwatch]::StartNew()
         Sleep-Until $vh 3000
@@ -215,6 +244,12 @@ $summary = [ordered]@{
     runs                  = $Runs
     coldMB                = $coldMed
     warmIdleMB            = Get-Median $warm
+    coldAt5sMB            = Get-Median $cold5
+    coldDaemonMB          = Get-Median $coldDaemon
+    warmViewerPresent     = -not $viewerMissing
+    warmDaemonMB          = Get-Median $warmDaemon
+    warmViewerMB          = Get-Median $warmViewer
+    warmIdleAt12sMB       = Get-Median $warm12
     warmIdleAt6sMB        = Get-Median $warm6
     warmIdleAt35sMB       = Get-Median $warm35
     warmAfterUseMB        = Get-Median $afterUse

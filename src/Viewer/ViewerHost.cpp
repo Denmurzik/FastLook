@@ -190,11 +190,19 @@ namespace fastlook::viewer
 
     void ViewerHost::Show(core::ipc::ShowPayload const& payload)
     {
+        if (m_exiting)
+        {
+            return; // the app is already closing: the windows are being torn down
+        }
         m_session->Show(payload);
     }
 
     bool ViewerHost::Toggle(core::ipc::ShowPayload const& payload)
     {
+        if (m_exiting)
+        {
+            return false;
+        }
         return m_session->Toggle(payload);
     }
 

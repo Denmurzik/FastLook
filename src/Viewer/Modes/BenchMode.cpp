@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -129,6 +130,7 @@ namespace fastlook::viewer
             Memory at100;
             Memory end;
             bool hasAt100 = false;
+            bool hasEnd = false;
         };
 
         std::string Num(double value)
@@ -154,9 +156,11 @@ namespace fastlook::viewer
                         ",\"p50ContentMs\":" + Num(Percentile(content, 0.50)) + ",\"p95ContentMs\":" + Num(Percentile(content, 0.95)) +
                         ",\"p50ShowMs\":" + Num(show == r.showMs.end() ? 0 : Percentile(show->second, 0.50)) + "}";
             }
-            json += "},\"privateBytesAt100MB\":" + Num(r.hasAt100 ? r.at100.privateBytesMB : 0) +
-                    ",\"privateBytesEndMB\":" + Num(r.end.privateBytesMB) + ",\"privateWsAt100MB\":" + Num(r.hasAt100 ? r.at100.privateWsMB : 0) +
-                    ",\"privateWsEndMB\":" + Num(r.end.privateWsMB) + "}\n";
+            // null = the sample was not taken (fewer than 100 iterations, or the run aborted): never a number that reads as zero growth.
+            auto const opt = [](bool has, double value) { return has ? Num(value) : std::string{"null"}; };
+            json += "},\"privateBytesAt100MB\":" + opt(r.hasAt100, r.at100.privateBytesMB) +
+                    ",\"privateBytesEndMB\":" + opt(r.hasEnd, r.end.privateBytesMB) + ",\"privateWsAt100MB\":" + opt(r.hasAt100, r.at100.privateWsMB) +
+                    ",\"privateWsEndMB\":" + opt(r.hasEnd, r.end.privateWsMB) + "}\n";
             std::ofstream file(fs::path(path), std::ios::binary | std::ios::trunc);
             file << json;
         }
@@ -183,11 +187,15 @@ namespace fastlook::viewer
                         co_return;
                     }
 
-                    LARGE_INTEGER readyAt{};
-                    bool ready = false;
-                    host.contentReady = [&] {
-                        readyAt = Now();
-                        ready = true;
+                    struct Ready
+                    {
+                        LARGE_INTEGER at{};
+                        bool ready = false;
+                    };
+                    auto const state = std::make_shared<Ready>();
+                    host.contentReady = [state] {
+                        state->at = Now();
+                        state->ready = true;
                     };
 
                     for (uint32_t i = 0; i < args.iterations; ++i)
@@ -197,19 +205,24 @@ namespace fastlook::viewer
                         payload.items.push_back({entry.path, false});
                         payload.navMode = core::ipc::NavMode::Selection;
 
-                        ready = false;
+                        state->ready = false;
                         auto const start = Now();
                         host.Show(payload);
                         auto const shown = Now();
 
-                        for (auto waited = std::chrono::milliseconds(0); !ready && waited < kContentCap; waited += kPoll)
+                        // The cap is a wall-clock deadline: resume_after wakes at timer granularity (~16 ms), so counting polls would stretch it.
+                        auto const deadline = std::chrono::steady_clock::now() + kContentCap;
+                        while (!state->ready && std::chrono::steady_clock::now() < deadline)
                         {
                             co_await winrt::resume_after(kPoll);
                             if (!co_await ResumeOn(ui))
                             {
+                                host.contentReady = nullptr;
                                 co_return;
                             }
                         }
+                        bool const ready = state->ready;
+                        auto const readyAt = state->at;
                         if (ready)
                         {
                             results.showMs[entry.kind].push_back(Ms(start, shown));
@@ -244,6 +257,7 @@ namespace fastlook::viewer
                     {
                         co_return;
                     }
+                    results.hasEnd = true;
                     results.end = SampleMemory();
                 }
             }

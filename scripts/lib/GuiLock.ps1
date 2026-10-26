@@ -5,7 +5,7 @@ $script:GuiLockPath = Join-Path ([IO.Path]::GetTempPath()) 'gui-e2e.lock'
 $script:GuiLockHeld = $false
 
 function Enter-GuiLock {
-    param([string]$Owner = 'perf', [int]$WaitMinutes = 30)
+    param([string]$Owner = 'perf-script', [int]$WaitMinutes = 30)
     $end = [DateTime]::UtcNow.AddMinutes($WaitMinutes)
     while ($true) {
         try {
@@ -13,7 +13,7 @@ function Enter-GuiLock {
                 Remove-Item $script:GuiLockPath -Force -ErrorAction SilentlyContinue
             }
             $fs = [IO.File]::Open($script:GuiLockPath, 'CreateNew', 'Write', 'None')
-            $b = [Text.Encoding]::UTF8.GetBytes("fastlook impl-33 $Owner $([DateTime]::UtcNow.ToString('o'))")
+            $b = [Text.Encoding]::UTF8.GetBytes("fastlook $Owner $([DateTime]::UtcNow.ToString('o'))")
             $fs.Write($b, 0, $b.Length); $fs.Dispose()
             $script:GuiLockHeld = $true
             return

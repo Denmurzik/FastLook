@@ -4,7 +4,7 @@
   Smoke run (spec 10): run-preview.ps1 for every file under tests/fixtures/ (recursively; skips .ps1, .py, .gitkeep).
 .DESCRIPTION
   Prints a table `file, alive, responding, privateWS_MB` and exits 1 when any run is not alive + responding. Plain screenshots
-  only: no input is injected. Screenshots go to out/shots/smoke/.
+  only: no input is injected, but the Viewer windows can take the foreground, so the desktop lock is held. Screenshots go to out/shots/smoke/.
 #>
 [CmdletBinding()]
 param(
@@ -15,12 +15,16 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'lib\GuiLock.ps1')
 $repo = Split-Path -Parent $PSScriptRoot
 $root = Join-Path $repo 'tests\fixtures'
 $shots = Join-Path $repo 'out\shots\smoke'
 New-Item -ItemType Directory -Force $shots | Out-Null
 
+# Every run shows a real Viewer window (it may take the foreground): hold the desktop lock for the whole sweep.
+Enter-GuiLock 'fastlook-smoke'
 $files = Get-ChildItem $root -Recurse -File | Where-Object { $_.Extension -notin '.ps1', '.py' -and $_.Name -ne '.gitkeep' } | Sort-Object FullName
+try {
 $rows = foreach ($f in $files) {
     $rel = [IO.Path]::GetRelativePath($root, $f.FullName)
     $png = Join-Path $shots (($rel -replace '[\\/:]', '_') + '.png')
@@ -32,6 +36,8 @@ $rows = foreach ($f in $files) {
     }
     [pscustomobject]@{ file = $rel; alive = $alive; responding = $responding; privateWS_MB = $ws }
 }
+}
+finally { Exit-GuiLock }
 
 $rows | Format-Table -AutoSize | Out-String -Width 200 | Write-Host
 $bad = @($rows | Where-Object { -not ($_.alive -and $_.responding) })

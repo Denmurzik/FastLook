@@ -6,7 +6,7 @@
   Builds out/bench-fixtures/ (24 MP photo, 10 MB text, png, gif, md, pdf, zip, mp3, a folder, an unknown binary) unless -Dir is
   given, runs `FastLook.Viewer.exe --bench <dir> --iterations N --out <json>` with an isolated FASTLOOK_DATA_DIR, prints the JSON
   and exits with the Viewer's exit code (1 when it timed out or wrote no valid JSON). The Viewer is always killed in `finally`.
-  No input is injected; the Viewer shows and hides its own window.
+  No input is injected, but the Viewer shows and activates its own window on every open, so %TEMP%\gui-e2e.lock is held for the run.
 #>
 [CmdletBinding()]
 param(
@@ -19,6 +19,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'lib\GuiLock.ps1')
 $repo = Split-Path -Parent $PSScriptRoot
 $exe = Join-Path $repo "out\bin\$Configuration\FastLook.Viewer.exe"
 if (-not (Test-Path $exe)) { throw "Not built: $exe (run scripts/build.ps1 first)" }
@@ -71,12 +72,15 @@ $env:FASTLOOK_DATA_DIR = $data
 $proc = $null
 $exit = 1
 try {
+    # The Viewer shows and activates its window 1000 times: hold the desktop lock for the run.
+    Enter-GuiLock 'fastlook-bench'
     Write-Host "bench: $Iterations iterations over $Dir (timeout $TimeoutSec s)"
     $proc = Start-Process -FilePath $exe -ArgumentList @('--bench', "`"$Dir`"", '--iterations', $Iterations, '--out', "`"$OutJson`"") -PassThru
     if ($proc.WaitForExit($TimeoutSec * 1000)) { $exit = $proc.ExitCode }
     else { Write-Host "bench: timed out after $TimeoutSec s"; $exit = 1 }
 }
 finally {
+    Exit-GuiLock
     if ($proc -and -not $proc.HasExited) { & taskkill.exe /T /F /PID $proc.Id *> $null }
     if ($null -ne $saved) { $env:FASTLOOK_DATA_DIR = $saved } else { Remove-Item Env:\FASTLOOK_DATA_DIR -ErrorAction SilentlyContinue }
     Remove-Item $data -Recurse -Force -ErrorAction SilentlyContinue
