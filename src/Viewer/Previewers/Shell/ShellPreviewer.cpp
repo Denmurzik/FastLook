@@ -265,11 +265,14 @@ namespace fastlook::viewer
         ReadDebugHang(args);
 
         auto const alive = m_alive;
-        auto onKey = [ui, alive](uint32_t vk, uint32_t mods) {
-            ui.TryEnqueue([alive, vk, mods] {
+        HWND const site = m_site;
+        auto onKey = [ui, alive, site](uint32_t vk, uint32_t mods) {
+            ui.TryEnqueue([alive, site, vk, mods] {
                 if (alive->load())
                 {
-                    ViewerHost::Get().HandleKey(vk, (mods & proto::kModCtrl) != 0, (mods & proto::kModShift) != 0, (mods & proto::kModAlt) != 0);
+                    // The site moves with its window when the preview is pinned: route by the window that holds it now.
+                    ViewerHost::Get().HandleKeyFrom(site, vk, (mods & proto::kModCtrl) != 0, (mods & proto::kModShift) != 0,
+                                                    (mods & proto::kModAlt) != 0);
                 }
             });
         };

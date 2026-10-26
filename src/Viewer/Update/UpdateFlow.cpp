@@ -18,6 +18,7 @@
 #include "Util/Async.h"
 #include "Util/SettingsUi.h"
 #include "Util/Str.h"
+#include "ViewerHost.h"
 
 namespace fastlook::viewer
 {
@@ -308,7 +309,7 @@ namespace fastlook::viewer
             {
                 co_return;
             }
-            Application::Current().Exit();
+            ViewerHost::Get().RequestExit(); // a playing pinned video closes in order first
         }
 
         Windows::Foundation::IAsyncAction RunCheck(XamlRoot root)

@@ -33,9 +33,9 @@ namespace fastlook::core
         case VK_SPACE: return pinned ? std::nullopt : std::optional{Command::Close};
         case VK_ESCAPE: return Command::Close;
         case VK_LEFT:
-        case VK_UP: return Command::Prev;
+        case VK_UP: return pinned ? std::nullopt : std::optional{Command::Prev};
         case VK_RIGHT:
-        case VK_DOWN: return Command::Next;
+        case VK_DOWN: return pinned ? std::nullopt : std::optional{Command::Next};
         case VK_RETURN: return Command::OpenDefault;
         case VK_F11: return Command::ToggleFullscreen;
         default: return std::nullopt;

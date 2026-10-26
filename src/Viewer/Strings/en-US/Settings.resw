@@ -91,7 +91,7 @@
     <value>English</value>
   </data>
   <data name="LanguageRestart" xml:space="preserve">
-    <value>Restart FastLook to apply the language</value>
+    <value>The new language applies after you close Settings</value>
   </data>
   <data name="LanguageRussian" xml:space="preserve">
     <value>Русский</value>

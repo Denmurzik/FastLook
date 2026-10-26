@@ -37,6 +37,8 @@ namespace fastlook::viewer
         std::function<void()> previewShown, previewHidden, settingsSaved, prewarmDone;
         std::function<void(int)> pinnedCountChanged;
         std::function<void(bool)> settingsWindowOpen;
+        // Server mode: runs its exit sequence (IPC first, then ExitAfterUnload). Unset: RequestExit goes to ExitAfterUnload.
+        std::function<void()> exitRequested;
         std::function<void(PreviewItem const&, core::ipc::NavMode, HWND explorer)> navigated;
     };
 
@@ -68,6 +70,9 @@ namespace fastlook::viewer
         bool ExecutePreviewerCommand(std::wstring_view command);
         // The current previewer's IKeyTarget first, then the key map, then Execute. True when the key was consumed.
         bool HandleKey(uint32_t vk, bool ctrl, bool shift, bool alt);
+        // A key forwarded from a child window (a shell handler's site): handled by the window that holds the child, the warm
+        // preview window or a pinned one. Dropped when the child is in neither.
+        bool HandleKeyFrom(HWND child, uint32_t vk, bool ctrl, bool shift, bool alt);
         // Moves the shown preview into its own window (min/max, switchers) and warms a fresh hidden window.
         void PinCurrent();
         // Shows the window off-screen without activating it until its first frame, then hides it (decision 26).
@@ -94,6 +99,11 @@ namespace fastlook::viewer
         void ExitApp();
         // Closes the preview window and every pinned window for good (no hide-instead-of-close); the exit sequence uses it.
         void CloseAllWindows();
+        // Unloads every previewer (the preview's and the pinned ones), then closes all windows and exits once a media player's
+        // ordered close (after a frame, on its own thread) has had time to run. Show requests are ignored from here on.
+        void ExitAfterUnload();
+        // An exit asked for from inside the app (the updater): the mode's exit sequence when it has one, else ExitAfterUnload.
+        void RequestExit();
 
     private:
         struct PinnedWindow;
@@ -102,6 +112,7 @@ namespace fastlook::viewer
 
         void PrewarmWindow(bool notify);
         void ExecutePinned(std::shared_ptr<PinnedWindow> const& pinned, Command command);
+        bool HandlePinnedKey(std::shared_ptr<PinnedWindow> const& pinned, uint32_t vk, bool ctrl, bool shift, bool alt);
         void OnPinnedClosing(std::shared_ptr<PinnedWindow> const& pinned);
 
         void ApplySettings();
@@ -118,6 +129,7 @@ namespace fastlook::viewer
         std::shared_ptr<PreviewSession> m_session;
         winrt::event_token m_closingToken{};
         std::vector<std::shared_ptr<PinnedWindow>> m_pinned;
+        winrt::Microsoft::UI::Dispatching::DispatcherQueueTimer m_exitTimer{nullptr};
         bool m_exiting = false;
     };
 }

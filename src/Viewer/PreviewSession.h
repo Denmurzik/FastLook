@@ -58,6 +58,9 @@ namespace fastlook::viewer
         std::optional<PinnedView> DetachForPin();
         // While a request is in flight: pins the item as soon as its content is attached. False when there is nothing to wait for.
         bool DeferPin();
+        // The exit sequence: cancels any request and unloads the attached previewer (a media player starts its ordered close).
+        // True when something was unloaded.
+        bool UnloadForExit();
 
     private:
         struct Monitor
@@ -155,6 +158,8 @@ namespace fastlook::viewer
         std::shared_ptr<PrepareRun> m_attached; // previewer whose view is in the window
         std::vector<std::shared_ptr<PrepareRun>> m_retiring;
         winrt::event_token m_renderToken{};
+        // Contexts made before a pin hold this weakly: once it is replaced their requestResize no longer refits the warm window.
+        std::shared_ptr<int> m_resizeScope = std::make_shared<int>(0);
         Preloader m_preloader;
         SelectionSync m_selectionSync;
     };

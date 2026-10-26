@@ -32,6 +32,16 @@ TEST(KeyMap, NavigationOpenFullscreen)
     EXPECT_FALSE(MapPreviewKey(VK_LEFT, true, false, false, false));
 }
 
+TEST(KeyMap, PinnedWindowLeavesArrowsToItsContent)
+{
+    for (uint32_t vk : {VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN})
+    {
+        EXPECT_FALSE(MapPreviewKey(vk, false, false, false, true)) << vk; // a pinned text/PDF/archive scrolls with them
+    }
+    EXPECT_EQ(MapPreviewKey(VK_RETURN, false, false, false, true), Command::OpenDefault);
+    EXPECT_EQ(MapPreviewKey(VK_F11, false, false, false, true), Command::ToggleFullscreen);
+}
+
 TEST(KeyMap, ZoomAndCopy)
 {
     EXPECT_EQ(MapPreviewKey(VK_OEM_PLUS, true, false, false, false), Command::ZoomIn);

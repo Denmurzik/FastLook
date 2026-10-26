@@ -91,7 +91,7 @@
     <value>English</value>
   </data>
   <data name="LanguageRestart" xml:space="preserve">
-    <value>Перезапустите FastLook, чтобы сменить язык</value>
+    <value>Язык сменится после закрытия настроек</value>
   </data>
   <data name="LanguageRussian" xml:space="preserve">
     <value>Русский</value>

@@ -128,7 +128,8 @@ namespace fastlook::viewer
             }
 
             // IPC first, so requests already queued on the UI thread are dropped without an ack and the daemon relaunches
-            // (decision 53); the watchdog guarantees the process ends even if a window refuses to close.
+            // (decision 53); then every previewer is unloaded and a media player closes in order before the windows go. The
+            // watchdog guarantees the process ends even if a window refuses to close.
             void Exit()
             {
                 if (std::exchange(exitStarted, true))
@@ -152,9 +153,7 @@ namespace fastlook::viewer
                 {
                     Sleep(static_cast<DWORD>(*ms)); // test hook: widen the window between pipe close and process exit
                 }
-                auto& host = ViewerHost::Get();
-                host.CloseAllWindows();
-                host.ExitApp();
+                ViewerHost::Get().ExitAfterUnload();
             }
 
             void ForegroundPreview()
@@ -292,6 +291,7 @@ namespace fastlook::viewer
                 server->ipc->SendEvent("pinned");
             }
         };
+        callbacks.exitRequested = [server] { server->Exit(); };
         callbacks.settingsSaved = [server] {
             server->OnSettingsReloaded();
             server->ipc->SendEvent("settingsChanged");

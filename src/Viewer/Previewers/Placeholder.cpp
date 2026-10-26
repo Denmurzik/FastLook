@@ -4,6 +4,7 @@
 #include <cstdlib>
 
 #include "FileTypes/FileName.h"
+#include "Util/Str.h"
 
 namespace fastlook::viewer
 {
@@ -25,18 +26,14 @@ namespace fastlook::viewer
         class PlaceholderPreviewer final : public IPreviewer
         {
         public:
-            explicit PlaceholderPreviewer(std::wstring label) : m_label(std::move(label)) {}
 
             winrt::Windows::Foundation::IAsyncAction PrepareAsync(PreviewItem item, std::shared_ptr<PreviewContext const> ctx) override
             {
                 auto self = shared_from_this();
                 auto cancel = co_await winrt::get_cancellation_token();
 
-                m_text = m_label + L": " + std::wstring{core::BaseName(item.ref.path)};
-                if (ctx->fallback)
-                {
-                    m_text += L"\n" + ctx->fallback->message;
-                }
+                m_text = std::wstring{core::BaseName(item.ref.path)} + L"\n" +
+                         (ctx->fallback ? ctx->fallback->message : std::wstring{Str(L"Common", L"PreviewFailed")});
 
                 if (DWORD const delay = TestPrepareDelayMs())
                 {
@@ -69,14 +66,13 @@ namespace fastlook::viewer
             void Unload() override { m_view = nullptr; }
 
         private:
-            std::wstring m_label;
             std::wstring m_text;
             UIElement m_view{nullptr};
         };
     }
 
-    std::shared_ptr<IPreviewer> MakePlaceholderPreviewer(std::wstring label)
+    std::shared_ptr<IPreviewer> MakePlaceholderPreviewer()
     {
-        return std::make_shared<PlaceholderPreviewer>(std::move(label));
+        return std::make_shared<PlaceholderPreviewer>();
     }
 }

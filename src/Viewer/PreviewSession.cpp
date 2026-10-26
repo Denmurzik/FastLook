@@ -225,6 +225,18 @@ namespace fastlook::viewer
         m_monitorHint = payload.monitor;
         m_iconRect = payload.iconRect;
         ++m_hideSerial; // a hide still animating out is abandoned
+        if (!m_visible && m_attached)
+        {
+            // ... and with it the unload it would have done: the old previewer must not keep playing or taking keys meanwhile.
+            ViewerHost::Get().Window()->ClearContent();
+            try
+            {
+                std::exchange(m_attached, nullptr)->previewer->Unload();
+            }
+            catch (...)
+            {
+            }
+        }
         m_pinPending = false;
         StartRequest(false);
     }
@@ -461,7 +473,7 @@ namespace fastlook::viewer
                         shownKind = PreviewerKind::Fallback;
                         break;
                     case Stage::Placeholder:
-                        previewer = MakePlaceholderPreviewer(L"Fallback");
+                        previewer = MakePlaceholderPreviewer();
                         shownKind = PreviewerKind::Fallback;
                         break;
                     }
@@ -828,9 +840,9 @@ namespace fastlook::viewer
         ctx->dark = host.Dark();
         ctx->settings = host.Settings();
         ctx->fallback = std::move(fallback);
-        ctx->requestResize = [weakSelf = weak_from_this(), ui = m_ui] {
-            ui.TryEnqueue([weakSelf] {
-                if (auto session = weakSelf.lock())
+        ctx->requestResize = [weakSelf = weak_from_this(), scope = std::weak_ptr<int>(m_resizeScope), ui = m_ui] {
+            ui.TryEnqueue([weakSelf, scope] {
+                if (auto session = weakSelf.lock(); session && !scope.expired()) // expired: the previewer was pinned
                 {
                     session->FitWindow(true);
                 }
@@ -1020,6 +1032,7 @@ namespace fastlook::viewer
         }
         PinnedView view{m_attached->previewer, m_shownItem};
         m_attached.reset();
+        m_resizeScope = std::make_shared<int>(0); // the pinned previewer's requestResize must not refit the warm window
         m_visible = false;
         m_preloader.Clear();
         ++m_hideSerial;
@@ -1029,6 +1042,32 @@ namespace fastlook::viewer
             m_renderToken = {};
         }
         return view;
+    }
+
+    bool PreviewSession::UnloadForExit()
+    {
+        m_pinPending = false;
+        CancelCurrent();
+        m_preloader.Clear();
+        ++m_hideSerial; // a hide still animating out must not unload again
+        auto attached = std::exchange(m_attached, nullptr);
+        if (!attached)
+        {
+            return false;
+        }
+        if (auto const window = ViewerHost::Get().CurrentWindow())
+        {
+            // Out of the window first, as HideAsync does: a media player closes once a frame without its video has rendered.
+            winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(window)->ClearContent();
+        }
+        try
+        {
+            attached->previewer->Unload();
+        }
+        catch (...)
+        {
+        }
+        return true;
     }
 
     bool PreviewSession::DeferPin()

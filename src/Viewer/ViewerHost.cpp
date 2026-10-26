@@ -14,6 +14,12 @@
 
 namespace fastlook::viewer
 {
+    namespace
+    {
+        // Covers MediaPreviewer's close: two frames or 100 ms, then Close() on the media thread. The exit watchdog bounds it.
+        constexpr auto kOrderedCloseDelay = std::chrono::milliseconds(400);
+    }
+
     // A preview that was pinned: its own window, the previewer that fills it and the item it shows.
     struct ViewerHost::PinnedWindow
     {
@@ -133,7 +139,13 @@ namespace fastlook::viewer
 
     void ViewerHost::ReloadSettings()
     {
-        m_doc = core::LoadSettings(m_paths.settingsFile);
+        auto doc = core::LoadSettings(m_paths.settingsFile);
+        if (doc.readFailed)
+        {
+            FL_LOG_INFO(L"settings reload failed, keeping previous values"); // as the daemon does; a later save still works
+            return;
+        }
+        m_doc = std::move(doc);
         ApplySettings();
     }
 
@@ -186,6 +198,57 @@ namespace fastlook::viewer
             close(pinned->window);
         }
         CloseSettingsWindow();
+    }
+
+    void ViewerHost::ExitAfterUnload()
+    {
+        if (m_exitTimer)
+        {
+            return; // already on its way out
+        }
+        m_exiting = true;
+        bool unloaded = m_session && m_session->UnloadForExit();
+        for (auto const& pinned : m_pinned)
+        {
+            if (!std::exchange(pinned->closed, true))
+            {
+                try
+                {
+                    pinned->previewer->Unload();
+                    unloaded = true;
+                }
+                catch (...)
+                {
+                }
+            }
+        }
+        auto const finish = [this] {
+            CloseAllWindows();
+            ExitApp();
+        };
+        if (!unloaded || !m_ui)
+        {
+            finish();
+            return;
+        }
+        // The windows stay up meanwhile: a player waits for a rendered frame without its video before it closes.
+        m_exitTimer = m_ui.CreateTimer();
+        m_exitTimer.Interval(kOrderedCloseDelay);
+        m_exitTimer.IsRepeating(false);
+        m_exitTimer.Tick([finish](auto const&, auto const&) { finish(); });
+        m_exitTimer.Start();
+    }
+
+    void ViewerHost::RequestExit()
+    {
+        if (m_callbacks.exitRequested)
+        {
+            m_callbacks.exitRequested();
+        }
+        else
+        {
+            ExitAfterUnload();
+        }
     }
 
     void ViewerHost::Show(core::ipc::ShowPayload const& payload)
@@ -327,6 +390,39 @@ namespace fastlook::viewer
         });
     }
 
+    bool ViewerHost::HandleKeyFrom(HWND child, uint32_t vk, bool ctrl, bool shift, bool alt)
+    {
+        HWND const root = child != nullptr ? GetAncestor(child, GA_ROOT) : nullptr;
+        if (root == nullptr)
+        {
+            return false;
+        }
+        auto const hwndOf = [](winrt::FastLook::PreviewWindow const& window) {
+            return window ? winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(window)->Hwnd() : nullptr;
+        };
+        for (auto const& pinned : m_pinned)
+        {
+            if (!pinned->closed && hwndOf(pinned->window) == root)
+            {
+                return HandlePinnedKey(pinned, vk, ctrl, shift, alt);
+            }
+        }
+        return hwndOf(m_window) == root && HandleKey(vk, ctrl, shift, alt);
+    }
+
+    bool ViewerHost::HandlePinnedKey(std::shared_ptr<PinnedWindow> const& pinned, uint32_t vk, bool ctrl, bool shift, bool alt)
+    {
+        return DispatchKey(pinned->previewer, vk, ctrl, shift, alt, true, [&](Command command) {
+            auto* window = winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(pinned->window);
+            if (command == Command::Close && vk == VK_ESCAPE && window->IsFullscreen())
+            {
+                window->ToggleFullscreen();
+                return;
+            }
+            ExecutePinned(pinned, command);
+        });
+    }
+
     void ViewerHost::PinCurrent()
     {
         if (!m_session || !m_window)
@@ -360,15 +456,7 @@ namespace fastlook::viewer
         });
         impl->SetKeyHandler([this, weak](uint32_t vk, bool ctrl, bool shift, bool alt) {
             auto strong = weak.lock();
-            return strong && DispatchKey(strong->previewer, vk, ctrl, shift, alt, true, [&](Command command) {
-                auto* window = winrt::get_self<winrt::FastLook::implementation::PreviewWindow>(strong->window);
-                if (command == Command::Close && vk == VK_ESCAPE && window->IsFullscreen())
-                {
-                    window->ToggleFullscreen();
-                    return;
-                }
-                ExecutePinned(strong, command);
-            });
+            return strong && HandlePinnedKey(strong, vk, ctrl, shift, alt);
         });
         pinned->closingToken = pinned->window.AppWindow().Closing(
             [this, weak](auto const&, winrt::Microsoft::UI::Windowing::AppWindowClosingEventArgs const&) {
