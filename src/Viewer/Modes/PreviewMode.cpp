@@ -2,6 +2,7 @@
 #include "Modes/Modes.h"
 
 #include "Diagnostics/Log.h"
+#include "Diagnostics/PerfLog.h"
 #include "Modes/ScriptRunner.h"
 #include "System/AppPaths.h"
 #include "ViewerHost.h"
@@ -60,7 +61,9 @@ namespace fastlook::viewer
 
         // The window frame is built before the first show request, as the server mode does at prewarm: the 50 ms
         // show-to-visible budget covers showing it, not XAML construction.
+        core::perf::Mark("startup_host");
         host.Window();
+        core::perf::Mark("startup_window");
 
         if (args.background)
         {

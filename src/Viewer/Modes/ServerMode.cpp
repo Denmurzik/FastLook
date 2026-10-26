@@ -12,6 +12,7 @@
 #include "System/AppPaths.h"
 #include "Text/Utf.h"
 #include "Util/Foreground.h"
+#include "Diagnostics/PerfLog.h"
 #include "Util/Trim.h"
 #include "ViewerHost.h"
 
@@ -266,7 +267,9 @@ namespace fastlook::viewer
 
         // The window frame is built up front; `--background` additionally renders a first frame off-screen without taking
         // focus (decision 26) and reports prewarmDone, otherwise the window counts as warm right away.
+        core::perf::Mark("startup_host");
         host.Window();
+        core::perf::Mark("startup_window");
         if (args.background)
         {
             host.PrewarmHidden();

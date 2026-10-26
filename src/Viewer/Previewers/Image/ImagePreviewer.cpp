@@ -56,6 +56,7 @@ namespace fastlook::viewer
             d2d.copy_from(DeviceResources::Get().D2DDevice()); // likewise: never fetched on the background thread
         }
         co_await winrt::resume_background();
+        core::perf::Mark("img_prepare_bg");
         std::shared_ptr<SvgImage> vector;
         std::shared_ptr<AnimatedImage> animation;
         DecodedImage decoded;
@@ -70,11 +71,13 @@ namespace fastlook::viewer
             {
                 throw PreviewError{};
             }
+            core::perf::Mark("img_anim_probe_done");
             if (!animation)
             {
                 decoded = DecodeToSize(m_path, target, stop.get_token(), std::move(wic));
             }
         }
+        core::perf::Mark("img_decoded");
         if (cancel() || (!svg && !animation && !decoded.bitmap))
         {
             co_return;
@@ -109,7 +112,9 @@ namespace fastlook::viewer
         m_native = core::OrientedSize(decoded.native, decoded.orientation);
         m_preferred = {static_cast<float>(m_native.w / ctx->scale), static_cast<float>(m_native.h / ctx->scale)};
         SoftwareBitmapSource source;
+        core::perf::Mark("img_ui_resumed");
         co_await source.SetBitmapAsync(decoded.bitmap);
+        core::perf::Mark("img_bitmap_set");
         if (cancel())
         {
             source.Close();

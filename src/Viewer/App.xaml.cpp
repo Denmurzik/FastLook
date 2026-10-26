@@ -88,7 +88,9 @@ namespace winrt::FastLook::implementation
                 FL_LOG_DEBUG(L"Unknown argument: {}", unknown); // may be a path: Debug only
             }
         }
+        core::perf::Mark("startup_settings");
         viewer::ApplyLanguage(settings.general.language, args.lang);
+        core::perf::Mark("startup_language");
 
         try
         {

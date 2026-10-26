@@ -7,6 +7,7 @@
 
 #include <cmath>
 
+#include "Diagnostics/PerfLog.h"
 #include "TitleBar.h"
 #include "Ui/Placement.h"
 #include "Util/Str.h"
@@ -49,6 +50,7 @@ namespace winrt::FastLook::implementation
     PreviewWindow::PreviewWindow()
     {
         InitializeComponent();
+        fastlook::core::perf::Mark("win_xaml_loaded");
 
         if (auto native = this->try_as<::IWindowNative>())
         {
@@ -74,8 +76,11 @@ namespace winrt::FastLook::implementation
             }
         });
 
+        fastlook::core::perf::Mark("win_before_extends");
         ExtendsContentIntoTitleBar(true);
+        fastlook::core::perf::Mark("win_extends_set");
         SetTitleBar(TitleBarHost());
+        fastlook::core::perf::Mark("win_titlebar_set");
 
         auto appWindow = AppWindow();
         appWindow.TitleBar().PreferredHeightOption(TitleBarHeightOption::Tall);
@@ -95,6 +100,7 @@ namespace winrt::FastLook::implementation
             }
         });
         UpdateCaptionInset();
+        fastlook::core::perf::Mark("win_ctor_done");
     }
 
     void PreviewWindow::UpdateCaptionInset()

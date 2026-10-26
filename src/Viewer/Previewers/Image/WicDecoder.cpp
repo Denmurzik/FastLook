@@ -5,6 +5,7 @@
 
 #include <algorithm>
 
+#include "Diagnostics/PerfLog.h"
 #include "FileTypes/StoreLinks.h"
 #include "Graphics/DeviceResources.h"
 #include "Imaging/DecodeMath.h"
@@ -201,6 +202,7 @@ namespace fastlook::viewer
             check_hresult(decoder->GetFrameCount(&frameCount));
             auto frame = PickFrame(decoder.get(), std::max(frameCount, 1u), container == GUID_ContainerFormatIco);
 
+            core::perf::Mark("dec_opened");
             UINT nativeW = 0, nativeH = 0;
             check_hresult(frame->GetSize(&nativeW, &nativeH));
             DecodedImage result;
@@ -218,6 +220,7 @@ namespace fastlook::viewer
             core::SizeU const stored = core::OrientedSize(fitted, result.orientation);
 
             com_ptr<IWICBitmapSource> source = TryNativeScale(wic, frame, result.native, stored);
+            core::perf::Mark("dec_native_scaled", source ? "dct=1" : "dct=0");
             if (!source)
             {
                 source = frame.as<IWICBitmapSource>();
@@ -246,6 +249,7 @@ namespace fastlook::viewer
                 buffer.Close();
                 check_hresult(copied);
             }
+            core::perf::Mark("dec_copied", "w=" + std::to_string(fitted.w) + " h=" + std::to_string(fitted.h));
             result.bitmap = std::move(bitmap);
             return result;
         }
