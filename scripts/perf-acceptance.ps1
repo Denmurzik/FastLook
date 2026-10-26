@@ -8,10 +8,10 @@
   Each step's console output goes to out/perf/<step>.log, its JSON to out/perf/<step>.json; the rows and all values go to
   out/perf-acceptance.json, rewritten after EVERY step, so a killed run still leaves the finished rows behind.
 
-  Bench memory rows (task 34, lead ruling): the acceptance row is the growth of FastLook's own memory (heap busy bytes, summed
-  over the 50-open intervals without a graphics-driver pool step) with the window really closing between opens, median of
-  -BenchRuns (default 3) bench runs; the graphics driver's pool (D3DKMT)
-  is reported in an INFO row. INFO rows never fail the run.
+  Bench memory rows (task 34, lead ruling): the acceptance row is the spec metric, warm-idle Private Working Set growth of the
+  Viewer from open 100 to the last open with the window really closing between opens, median of -BenchRuns (default 3) runs.
+  Own heap memory (heap busy bytes outside graphics-driver pool steps), the driver pool (D3DKMT) and Private Bytes are INFO rows
+  (INFO rows never fail the run).
 
   Honesty rules: before a step runs its JSON is deleted; a step that throws, exits non-zero (ram, bench, video) or leaves no JSON
   gives "not measured" (= FAIL), never an earlier run's numbers. Steps not selected (-Only / -Skip) read the JSON stored by an
@@ -94,6 +94,11 @@ function Get-ExitText([string]$Name) {
     if ($st -and $st.ran) { if ($null -eq $st.exit) { 'no exit code' } else { "$($st.exit)" } } else { 'stored' }
 }
 function Num($x) { if ($null -eq $x -or "$x" -eq '') { $null } else { [double]$x } }
+# Spec 9 "1000 open/close: growth <= 2 MB": warm-idle Private Working Set (Task Manager's memory column) of the Viewer at open 100
+# (after a 100-open warm-up) and after the last open, each sampled 1 s after the close, after the idle trim, settled 1 s.
+function WsGrowth($d) {
+    if ($d -and $null -ne $d.privateWsEndMB -and $null -ne $d.privateWsAt100MB) { [math]::Round([double]$d.privateWsEndMB - [double]$d.privateWsAt100MB, 2) } else { $null }
+}
 function Growth($d) {
     if ($d -and $null -ne $d.privateBytesEndMB -and $null -ne $d.privateBytesAt100MB) { [math]::Round([double]$d.privateBytesEndMB - [double]$d.privateBytesAt100MB, 2) } else { $null }
 }
@@ -153,11 +158,15 @@ function Build-Rows {
     Add-Row 'Space -> window (cold) p50, ms' (Num $cold.coldWindowMs.p50) '<= 400' { param($v) $v -le 400 } 'e2e -Cold'
     Add-Row '24 MP photo, MB (daemon + Viewer)' (Num $ram.photoMB) '<= 120' { param($v) $v -le 120 } 'measure-ram'
     $bs = Split-Growth $bench
-    $bsMedian = if ($bench -and $bench.medianOf) { "median of {0} runs (own by run: {1}; median run {2}); median run: " -f $bench.medianOf.runs, (($bench.medianOf.ownByRun | ForEach-Object { '{0:n2}' -f $_ }) -join ' / '), $bench.medianOf.medianRun } else { 'single run: ' }
-    $bsOwnDetail = if ($bs) { $bsMedian + "raw {0} MB, of it {1} MB in the {2} of {3} intervals with a driver step (driver bookkeeping in the process heap); non-heap private commit {4} MB; handles {5:+#;-#;0}; Private Bytes {6} MB" -f $bs.ownRaw, $bs.ownInSteps, $bs.driverSteps, $bs.intervals, $bs.nonHeap, $bs.handles, $bs.privateBytes } else { '' }
-    Add-Row ('{0} opens: own memory growth (heap busy, 100 -> end, outside driver steps), MB' -f $BenchIterations) (Num $bs.own) '<= 2' { param($v) $v -le 2 } 'bench' -Detail $bsOwnDetail
+    $bsMedian = if ($bench -and $bench.medianOf) { "median of {0} runs (by run: {1}; median run {2})" -f $bench.medianOf.runs, (($bench.medianOf.wsByRun | ForEach-Object { '{0:n2}' -f $_ }) -join ' / '), $bench.medianOf.medianRun } else { 'single run' }
+    $bsWsDetail = if ($bench) { "{0}; Viewer only (the bench runs no daemon); {1} -> {2} MB" -f $bsMedian, $bench.privateWsAt100MB, $bench.privateWsEndMB } else { '' }
+    Add-Row ('{0} opens: warm-idle Private WS growth (100 -> end), MB' -f $BenchIterations) (Num (WsGrowth $bench)) '<= 2' { param($v) $v -le 2 } 'bench' -Detail $bsWsDetail
+    $bsOwnMedian = if ($bench -and $bench.medianOf -and $bench.medianOf.ownByRun) { "by run: {0}; " -f (($bench.medianOf.ownByRun | ForEach-Object { '{0:n2}' -f $_ }) -join ' / ') } else { '' }
+    $bsOwnDetail = if ($bs) { $bsOwnMedian + "median run: raw {0} MB, of it {1} MB in the {2} of {3} intervals with a driver step (driver bookkeeping in the process heap); non-heap private commit {4} MB; handles {5:+#;-#;0}; Private Bytes {6} MB" -f $bs.ownRaw, $bs.ownInSteps, $bs.driverSteps, $bs.intervals, $bs.nonHeap, $bs.handles, $bs.privateBytes } else { '' }
+    Add-Row ('{0} opens: own memory growth (heap busy, 100 -> end, outside driver steps), MB' -f $BenchIterations) (Num $bs.own) 'reported' { $true } 'bench' -Info -Detail $bsOwnDetail
     $bsDrvDetail = if ($bs) { "{0} step(s) of +{1} MB in total; outside the steps {2} MB" -f $bs.driverSteps, $bs.driverStepMB, $bs.driverRest } else { '' }
-    Add-Row ('{0} opens: graphics driver pool growth (D3DKMT, 100 -> end), MB' -f $BenchIterations) (Num $bs.driver) 'reported (bounded)' { $true } 'bench' -Info -Detail $bsDrvDetail
+    Add-Row ('{0} opens: graphics driver pool growth (D3DKMT, 100 -> end), MB' -f $BenchIterations) (Num $bs.driver) 'reported (400 MB net)' { $true } 'bench' -Info -Detail $bsDrvDetail
+    Add-Row ('{0} opens: Private Bytes growth (100 -> end), MB' -f $BenchIterations) (Num (Growth $bench)) 'reported (400 MB net)' { $true } 'bench' -Info
     $failShown = if ($bench) { "{0} / {1}" -f $bench.failures, $(if ((Get-ExitText 'bench') -eq 'stored') { 0 } else { Get-ExitText 'bench' }) } else { $null }
     Add-Row ('{0} opens: failures / exit code' -f $BenchIterations) $failShown '0 / 0' { $bench.failures -eq 0 -and $failShown -eq '0 / 0' } 'bench'
     Add-Row ('{0} spaces: missed / crashes' -f $E2EIterations) $(if ($e2e) { "{0} / {1}" -f $e2e.missed, $e2e.crashes } else { $null }) '0 / 0' { $e2e.missed -eq 0 -and $e2e.crashes -eq 0 } 'e2e'
@@ -171,9 +180,12 @@ function Build-Rows {
     Add-Row 'After video preview + trim, MB (daemon + Viewer)' (Num $ram.videoAfterTrimMB) '<= 25' { param($v) $v -le 25 } 'measure-ram'
     $vs = Split-Growth $video
     $vsOwnDetail = if ($vs) { "raw {0} MB, of it {1} MB in the {2} of {3} intervals with a driver step; non-heap private commit {4} MB; handles {5:+#;-#;0}; Private Bytes {6} MB" -f $vs.ownRaw, $vs.ownInSteps, $vs.driverSteps, $vs.intervals, $vs.nonHeap, $vs.handles, $vs.privateBytes } else { '' }
-    Add-Row ('Repeated video opens ({0}): own memory growth (heap busy, outside driver steps), MB' -f $VideoIterations) (Num $vs.own) '<= 2' { param($v) $v -le 2 } 'bench (video)' -Detail $vsOwnDetail
+    $vsWsDetail = if ($video) { "Viewer only; {0} -> {1} MB" -f $video.privateWsAt100MB, $video.privateWsEndMB } else { '' }
+    Add-Row ('Repeated video opens ({0}): warm-idle Private WS growth (100 -> end), MB' -f $VideoIterations) (Num (WsGrowth $video)) '<= 2' { param($v) $v -le 2 } 'bench (video)' -Detail $vsWsDetail
+    Add-Row ('Repeated video opens ({0}): own memory growth (heap busy, outside driver steps), MB' -f $VideoIterations) (Num $vs.own) 'reported' { $true } 'bench (video)' -Info -Detail $vsOwnDetail
     $vsDrvDetail = if ($vs) { "{0} step(s) of +{1} MB in total; outside the steps {2} MB" -f $vs.driverSteps, $vs.driverStepMB, $vs.driverRest } else { '' }
-    Add-Row ('Repeated video opens ({0}): graphics driver pool growth (D3DKMT), MB' -f $VideoIterations) (Num $vs.driver) 'reported (bounded)' { $true } 'bench (video)' -Info -Detail $vsDrvDetail
+    Add-Row ('Repeated video opens ({0}): graphics driver pool growth (D3DKMT), MB' -f $VideoIterations) (Num $vs.driver) 'reported (400 MB net)' { $true } 'bench (video)' -Info -Detail $vsDrvDetail
+    Add-Row ('Repeated video opens ({0}): Private Bytes growth (100 -> end), MB' -f $VideoIterations) (Num (Growth $video)) 'reported (400 MB net)' { $true } 'bench (video)' -Info
     Add-Row 'Repeated video opens: failures' (Num $video.failures) '0' { param($v) $v -eq 0 } 'bench (video)'
     Add-Row '24 MP + 24 MP neighbours, MB (Viewer + cold daemon)' (Num $ram.neighboursTotalMB) '<= 120' { param($v) $v -le 120 } 'measure-ram'
     Add-Row 'anim_start while neighbours decode, max ms' (Num $ram.animStartMs.max) '<= 50 (derived)' { param($v) $v -le 50 } 'measure-ram'
@@ -218,7 +230,7 @@ foreach ($name in $allSteps) {
     }
     $step = $steps[$name]
     if ($name -eq 'bench') {
-        # The own-memory row is the median of $BenchRuns runs (lead ruling, task 34): one run is too noisy (driver steps).
+        # The warm-idle row is the median of $BenchRuns runs (lead ruling, task 34): one run is too noisy.
         $sw = [Diagnostics.Stopwatch]::StartNew()
         $runs = [System.Collections.Generic.List[object]]::new()
         $exits = @()
@@ -236,8 +248,8 @@ foreach ($name in $allSteps) {
             if (Test-Path $runJson) {
                 try {
                     $d = Get-Content $runJson -Raw | ConvertFrom-Json
-                    $g = Split-Growth $d
-                    if ($g) { $runs.Add([pscustomobject]@{ run = $r; own = $g.own; data = $d }) }
+                    $ws = WsGrowth $d
+                    if ($null -ne $ws) { $runs.Add([pscustomobject]@{ run = $r; ws = $ws; data = $d }) }
                 }
                 catch { }
             }
@@ -245,14 +257,14 @@ foreach ($name in $allSteps) {
         $state[$name].exit = if ($exits.Count -eq $BenchRuns -and @($exits | Where-Object { $_ -ne 0 }).Count -eq 0) { 0 } else { 1 }
         if ($runs.Count -eq $BenchRuns) {
             # bench.json = the median run, with the failures of all runs and the per-run own values for the row detail.
-            $sorted = @($runs | Sort-Object own)
+            $sorted = @($runs | Sort-Object ws)
             $median = $sorted[[int][math]::Floor(($sorted.Count - 1) / 2)]
             $out = $median.data
             $out.failures = ($runs | ForEach-Object { [int]$_.data.failures } | Measure-Object -Sum).Sum
-            $out | Add-Member -NotePropertyName medianOf -NotePropertyValue ([pscustomobject]@{ runs = $BenchRuns; medianRun = $median.run; ownByRun = @($runs | ForEach-Object { $_.own }) }) -Force
+            $out | Add-Member -NotePropertyName medianOf -NotePropertyValue ([pscustomobject]@{ runs = $BenchRuns; medianRun = $median.run; wsByRun = @($runs | ForEach-Object { $_.ws }); ownByRun = @($runs | ForEach-Object { (Split-Growth $_.data).own }) }) -Force
             $out | ConvertTo-Json -Depth 8 | Set-Content $json[$name] -Encoding utf8
         }
-        elseif (-not $state[$name].note) { $state[$name].note = "only $($runs.Count) of $BenchRuns runs gave a memory split" }
+        elseif (-not $state[$name].note) { $state[$name].note = "only $($runs.Count) of $BenchRuns runs gave both warm-idle samples" }
         Write-Host ("== {0}: exit {1} in {2:n0} s {3}" -f $name, $state[$name].exit, $sw.Elapsed.TotalSeconds, $state[$name].note)
         $null = Save-Result
         continue

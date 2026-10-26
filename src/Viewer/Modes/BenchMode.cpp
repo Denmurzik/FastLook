@@ -429,6 +429,14 @@ namespace fastlook::viewer
                         }
                         if (results.iterations == kSampleAt)
                         {
+                            // Warm-idle sample, taken like the one at the end: the closed preview has finished releasing (1 s),
+                            // the idle trim runs, and the working set settles for 1 s before Private WS is read.
+                            co_await winrt::resume_after(kSettle);
+                            if (!co_await ResumeOn(ui))
+                            {
+                                co_return;
+                            }
+                            TrimWorkingSet();
                             co_await winrt::resume_after(kSettle);
                             if (!co_await ResumeOn(ui))
                             {
@@ -442,6 +450,12 @@ namespace fastlook::viewer
 
                     host.contentReady = nullptr;
                     host.Hide();
+                    // Warm-idle sample (see the one at 100): settled since the last close, idle trim, 1 s.
+                    co_await winrt::resume_after(kSettle);
+                    if (!co_await ResumeOn(ui))
+                    {
+                        co_return;
+                    }
                     TrimWorkingSet();
                     co_await winrt::resume_after(kSettle);
                     if (!co_await ResumeOn(ui))
