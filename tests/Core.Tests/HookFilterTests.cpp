@@ -640,3 +640,30 @@ TEST(HookFilter, ExplorerDefViewItselfStillPasses)
     wcscpy_s(f.focusClass, L"SHELLDLL_DefView");
     EXPECT_EQ(h.Decide(Space(true), &f, HookConfig{}), HookVerdict::Pass);
 }
+
+// The hook callback skips Decide() for every key that is neither Space nor a type-ahead keydown (no syscalls on that path).
+// This pins that such keys never change what the next Space press decides.
+TEST(HookFilter, KeysOutsideSpaceAndTypeAheadDoNotAffectNextSpace)
+{
+    HookConfig c;
+    auto f = ListFocus();
+    for (uint32_t vk = 1; vk < 256; ++vk)
+    {
+        if (vk == VK_SPACE) continue;
+        for (bool down : {true, false})
+        {
+            if (down && IsTypeAheadKey(vk)) continue; // a type-ahead keydown legitimately arms the window
+            // Arm type-ahead first so a skipped key that wrongly cleared or extended it would change the verdict.
+            HookFilter armed;
+            armed.Decide(Key('A', 5000), nullptr, c);
+            HookFilter reference = armed;
+            KeySnapshot k{.vk = vk, .keyDown = down, .timeMs = 5100, .fgThreadId = 42};
+            armed.Decide(k, nullptr, c);
+            EXPECT_EQ(armed.Decide(Space(true, 5200), &f, c), reference.Decide(Space(true, 5200), &f, c)) << "vk " << vk << " down " << down;
+
+            HookFilter idle, idleRef;
+            idle.Decide(k, nullptr, c);
+            EXPECT_EQ(idle.Decide(Space(true, 9000), &f, c), idleRef.Decide(Space(true, 9000), &f, c)) << "vk " << vk << " down " << down;
+        }
+    }
+}

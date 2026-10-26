@@ -66,14 +66,14 @@ namespace fastlook::daemon
             DWORD const viewerPid = g_viewerPid.load(std::memory_order_relaxed);
             for (auto const& e : t_fgCache)
             {
-                // A WorkerW only gains its SHELLDLL_DefView child some time after it is created: never cache it as Other.
                 if (e.hwnd == fg && e.thread == thread && e.viewerPid == viewerPid)
                 {
                     return e.kind;
                 }
             }
             auto const kind = ClassifyUncached(fg, pid, viewerPid);
-            if (kind != core::hook::ForegroundKind::Other) // Other may be a desktop window still being built
+            // Never cache Other: a WorkerW only gains its SHELLDLL_DefView child some time after it is created.
+            if (kind != core::hook::ForegroundKind::Other)
             {
                 t_fgCache[t_fgNext] = {fg, thread, viewerPid, kind};
                 t_fgNext = (t_fgNext + 1) % kCacheSize;
@@ -132,6 +132,10 @@ namespace fastlook::daemon
         DWORD pid = 0;
         DWORD const thread = GetWindowThreadProcessId(fg, &pid);
         out.fg = ClassifyCached(fg, thread, pid);
+        if (out.fg == core::hook::ForegroundKind::Other || out.fg == core::hook::ForegroundKind::OurPreview)
+        {
+            return; // Decide() passes these before it looks at the focus, so skip every focus query
+        }
         GUITHREADINFO gti{};
         gti.cbSize = sizeof(gti);
         if (thread == 0 || !GetGUIThreadInfo(thread, &gti))
